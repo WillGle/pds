@@ -13,6 +13,7 @@ from queue import Queue
 import pandas as pd
 import streamlit as st
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tt import scrape_tiktok_full_stats, sanitize_tiktok_url
 
 
 
@@ -35,7 +36,11 @@ def _k(cipher_b64):
         pass
     kb = hashlib.sha256(k_str.encode('utf-8')).digest()
     raw = base64.b64decode(cipher_b64)
-    return bytes([x ^ kb[i % len(kb)] for i, x in enumerate(raw)]).decode('utf-8')
+    try:
+        return bytes([x ^ kb[i % len(kb)] for i, x in enumerate(raw)]).decode('utf-8')
+    except Exception:
+        default_kb = bytes.fromhex('424ced75dc77303965a4a69759f2212a7486d1fcc2d96fe7ecc3ad4259a9944f')
+        return bytes([x ^ default_kb[i % len(default_kb)] for i, x in enumerate(raw)]).decode('utf-8')
 
 
 S_CHROMIUM = _k("ISSfGrEeRVQ=")
@@ -624,121 +629,268 @@ def scrape_facebook_full_stats(urls, max_workers=5, metrics_container=None, prog
 
 
 
+def create_excel_download_buffer(df, sheet_name='Scraped Data'):
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        ws = writer.sheets[sheet_name]
+        try:
+            from openpyxl.styles import Font, PatternFill, Alignment
+            header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
+            header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+            center_align = Alignment(horizontal="center", vertical="center")
+
+            for cell in ws[1]:
+                cell.fill = header_fill
+                cell.font = header_font
+                cell.alignment = center_align
+
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+                for cell in row:
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = '#,##0'
+                    cell.alignment = center_align
+        except Exception:
+            pass
+    excel_buffer.seek(0)
+    return excel_buffer
+
+
 if __name__ == "__main__":
-    st.set_page_config(page_title="Data Scraper", layout="wide")
-    st.title("Data Scraper - Internal Use Only")
+    st.set_page_config(page_title="Social Media Data Scraper", layout="wide")
+    st.title("Social Media Data Scraper (Facebook & TikTok)")
 
-    input_text = st.text_area(
-        "Enter URL list (one per line):",
-        height=150,
-        value=S_DEFAULT_DEMO_URL,
-    )
+    tab_fb, tab_tt = st.tabs(["📘 Facebook Scraper", "🎵 TikTok Scraper"])
 
-    if st.button("Start"):
-        urls = [url.strip() for url in input_text.split("\n") if url.strip()]
-        if urls:
-            metrics_container = st.empty()
-            progress_bar = st.progress(0.0)
+    with tab_fb:
+        st.subheader("Facebook Video / Reels Data Retrieval")
+        input_text_fb = st.text_area(
+            "Enter Facebook URL list (one per line):",
+            height=150,
+            value=S_DEFAULT_DEMO_URL,
+            key="fb_url_input"
+        )
 
-            try:
-                start_time = time.time()
-                final_output = scrape_facebook_full_stats(
-                    urls, metrics_container=metrics_container, progress_bar=progress_bar
-                )
-                elapsed = time.time() - start_time
-                avg_speed = elapsed / len(urls) if len(urls) > 0 else 0
+        if st.button("Start Facebook Scraping", key="fb_start_btn"):
+            urls_fb = [url.strip() for url in input_text_fb.split("\n") if url.strip()]
+            if urls_fb:
+                metrics_container_fb = st.empty()
+                progress_bar_fb = st.progress(0.0)
 
-                progress_bar.empty()
+                try:
+                    start_time_fb = time.time()
+                    final_output_fb = scrape_facebook_full_stats(
+                        urls_fb, metrics_container=metrics_container_fb, progress_bar=progress_bar_fb
+                    )
+                    elapsed_fb = time.time() - start_time_fb
+                    avg_speed_fb = elapsed_fb / len(urls_fb) if len(urls_fb) > 0 else 0
 
-                with metrics_container.container():
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("📋 Total Tasks", len(urls))
-                    col2.metric("✅ Completed Tasks", f"{len(final_output)} / {len(urls)}")
-                    col3.metric("⏱️ Total Time", f"{elapsed:.2f}s")
-                    col4.metric("⚡ Avg Speed", f"{avg_speed:.2f}s / task")
+                    progress_bar_fb.empty()
 
-                st.success(f"Successfully processed {len(urls)} task(s) in {elapsed:.2f} seconds!")
+                    with metrics_container_fb.container():
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("📋 Total Tasks", len(urls_fb))
+                        col2.metric("✅ Completed Tasks", f"{len(final_output_fb)} / {len(urls_fb)}")
+                        col3.metric("⏱️ Total Time", f"{elapsed_fb:.2f}s")
+                        col4.metric("⚡ Avg Speed", f"{avg_speed_fb:.2f}s / task")
 
-                df = pd.DataFrame(final_output)
+                    st.success(f"Successfully processed {len(urls_fb)} task(s) in {elapsed_fb:.2f} seconds!")
 
-                # Feature 4A: Top 5 Viral Videos Dashboard
-                if not df.empty and "views" in df.columns:
-                    valid_views = df[df["views"].notna()].sort_values(by="views", ascending=False)
-                    if not valid_views.empty:
-                        with st.expander("🏆 **Top 5 Viral Videos (Highest Views)**", expanded=True):
-                            st.dataframe(
-                                valid_views.head(5),
-                                use_container_width=True,
-                                column_config={
-                                    "url": st.column_config.LinkColumn("url", help="Click to open link"),
-                                    "views": st.column_config.NumberColumn("views", format="%d 👁️"),
-                                    "likes": st.column_config.NumberColumn("likes", format="%d 👍"),
-                                    "comments": st.column_config.NumberColumn("comments", format="%d 💬"),
-                                    "shares": st.column_config.NumberColumn("shares", format="%d 🔁"),
-                                }
-                            )
+                    df_fb = pd.DataFrame(final_output_fb)
 
-                st.markdown("### 📋 Full Scraped Data")
-                st.dataframe(
-                    df,
-                    use_container_width=True,
-                    column_config={
-                        "url": st.column_config.LinkColumn("url", help="Click to open link in new tab")
-                    }
-                )
+                    # Feature 4A: Top 5 Viral Videos Dashboard
+                    if not df_fb.empty and "views" in df_fb.columns:
+                        valid_views_fb = df_fb[df_fb["views"].notna()].sort_values(by="views", ascending=False)
+                        if not valid_views_fb.empty:
+                            with st.expander("🏆 **Top 5 Viral Videos (Highest Views)**", expanded=True):
+                                st.dataframe(
+                                    valid_views_fb.head(5),
+                                    use_container_width=True,
+                                    column_config={
+                                        "url": st.column_config.LinkColumn("url", help="Click to open link"),
+                                        "views": st.column_config.NumberColumn("views", format="%d 👁️"),
+                                        "likes": st.column_config.NumberColumn("likes", format="%d 👍"),
+                                        "comments": st.column_config.NumberColumn("comments", format="%d 💬"),
+                                        "shares": st.column_config.NumberColumn("shares", format="%d 🔁"),
+                                    }
+                                )
 
-                # Feature 4B: Formatted Excel Export with openpyxl styling
-                excel_buffer = io.BytesIO()
-                with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                    df.to_excel(writer, index=False, sheet_name='Scraped Data')
-                    ws = writer.sheets['Scraped Data']
-                    
-                    try:
-                        from openpyxl.styles import Font, PatternFill, Alignment
-                        header_fill = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
-                        header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
-                        center_align = Alignment(horizontal="center", vertical="center")
-
-                        for cell in ws[1]:
-                            cell.fill = header_fill
-                            cell.font = header_font
-                            cell.alignment = center_align
-
-                        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
-                            for cell in row:
-                                if isinstance(cell.value, (int, float)):
-                                    cell.number_format = '#,##0'
-                                cell.alignment = center_align
-                    except Exception:
-                        pass
-
-                excel_buffer.seek(0)
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_name_excel = f"scraped_data_{timestamp}.xlsx"
-                file_name_csv = f"scraped_data_{timestamp}.csv"
-
-                col_dl1, col_dl2 = st.columns(2)
-                with col_dl1:
-                    st.download_button(
-                        label="📊 Download Formatted Excel (.xlsx)",
-                        data=excel_buffer,
-                        file_name=file_name_excel,
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    st.markdown("### 📋 Full Scraped Facebook Data")
+                    st.dataframe(
+                        df_fb,
+                        use_container_width=True,
+                        column_config={
+                            "url": st.column_config.LinkColumn("url", help="Click to open link in new tab")
+                        }
                     )
 
-                # Feature 4C: CSV Export with UTF-8 BOM (utf-8-sig)
-                csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
-                with col_dl2:
-                    st.download_button(
-                        label="📄 Download CSV (UTF-8 BOM)",
-                        data=csv_bytes,
-                        file_name=file_name_csv,
-                        mime="text/csv",
+                    # Export formatted Excel & CSV
+                    excel_buffer_fb = create_excel_download_buffer(df_fb, sheet_name='Facebook Data')
+                    timestamp_fb = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    file_name_excel_fb = f"fb_scraped_data_{timestamp_fb}.xlsx"
+                    file_name_csv_fb = f"fb_scraped_data_{timestamp_fb}.csv"
+
+                    col_dl1_fb, col_dl2_fb = st.columns(2)
+                    with col_dl1_fb:
+                        st.download_button(
+                            label="📊 Download Formatted Excel (.xlsx)",
+                            data=excel_buffer_fb,
+                            file_name=file_name_excel_fb,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="fb_dl_excel"
+                        )
+
+                    csv_bytes_fb = df_fb.to_csv(index=False).encode("utf-8-sig")
+                    with col_dl2_fb:
+                        st.download_button(
+                            label="📄 Download CSV (UTF-8 BOM)",
+                            data=csv_bytes_fb,
+                            file_name=file_name_csv_fb,
+                            mime="text/csv",
+                            key="fb_dl_csv"
+                        )
+                except FileNotFoundError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Browser error: {e}")
+            else:
+                st.warning("Please enter at least one URL.")
+
+    with tab_tt:
+        st.subheader("TikTok Video Data Retrieval")
+        st.caption("Retrieve view count, like count, comment count, share count, collection count (save), and release date from TikTok links.")
+
+        demo_tt_urls = "\n".join([
+            "https://www.tiktok.com/@nawngs.vlog/video/7573658249547861268",
+            "https://www.tiktok.com/@giadinhcamtaoo/video/7568842259982978322",
+            "https://www.tiktok.com/@duyluandethuong/video/7578311186408656136"
+        ])
+
+        input_text_tt = st.text_area(
+            "Enter TikTok URL list (one per line):",
+            height=150,
+            value=demo_tt_urls,
+            key="tt_url_input"
+        )
+
+        st.markdown("**Select Fields to Display / Export:**")
+        col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+        with col_f1:
+            sel_view = st.checkbox("View Count", value=True, key="tt_f_view")
+            sel_like = st.checkbox("Like Count", value=True, key="tt_f_like")
+        with col_f2:
+            sel_comment = st.checkbox("Comment Count", value=True, key="tt_f_comment")
+            sel_share = st.checkbox("Share Count", value=True, key="tt_f_share")
+        with col_f3:
+            sel_collect = st.checkbox("Collection Count (Save)", value=True, key="tt_f_collect")
+            sel_time = st.checkbox("Release Time", value=True, key="tt_f_time")
+        with col_f4:
+            sel_uploader = st.checkbox("Uploader", value=True, key="tt_f_uploader")
+            sel_title = st.checkbox("Title", value=True, key="tt_f_title")
+
+        if st.button("Retrieve TikTok Data", key="tt_start_btn", type="primary"):
+            urls_tt = [url.strip() for url in input_text_tt.split("\n") if url.strip()]
+            if urls_tt:
+                metrics_container_tt = st.empty()
+                progress_bar_tt = st.progress(0.0)
+
+                try:
+                    start_time_tt = time.time()
+                    final_output_tt = scrape_tiktok_full_stats(
+                        urls_tt, progress_bar=progress_bar_tt, metrics_container=metrics_container_tt
                     )
-            except FileNotFoundError as e:
-                st.error(str(e))
-            except Exception as e:
-                st.error(f"Browser error: {e}")
-        else:
-            st.warning("Please enter at least one URL.")
+                    elapsed_tt = time.time() - start_time_tt
+                    avg_speed_tt = elapsed_tt / len(urls_tt) if len(urls_tt) > 0 else 0
+
+                    progress_bar_tt.empty()
+
+                    with metrics_container_tt.container():
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("📋 Total Tasks", len(urls_tt))
+                        col2.metric("✅ Completed Tasks", f"{len(final_output_tt)} / {len(urls_tt)}")
+                        col3.metric("⏱️ Total Time", f"{elapsed_tt:.2f}s")
+                        col4.metric("⚡ Avg Speed", f"{avg_speed_tt:.2f}s / task")
+
+                    st.success(f"Successfully processed {len(urls_tt)} TikTok task(s) in {elapsed_tt:.2f} seconds!")
+
+                    df_raw_tt = pd.DataFrame(final_output_tt)
+
+                    # Top 5 Viral TikTok Videos Dashboard
+                    if not df_raw_tt.empty and "View Count" in df_raw_tt.columns:
+                        valid_views_tt = df_raw_tt[df_raw_tt["View Count"].notna()].sort_values(by="View Count", ascending=False)
+                        if not valid_views_tt.empty:
+                            with st.expander("🏆 **Top 5 Viral TikTok Videos (Highest Views)**", expanded=True):
+                                viral_cols = [c for c in ["url", "Uploader", "View Count", "Like Count", "Comment Count", "Share Count", "Collection Count", "Release Time"] if c in valid_views_tt.columns]
+                                st.dataframe(
+                                    valid_views_tt.head(5)[viral_cols],
+                                    use_container_width=True,
+                                    column_config={
+                                        "url": st.column_config.LinkColumn("url", help="Click to open video link"),
+                                        "View Count": st.column_config.NumberColumn("View Count", format="%d 👁️"),
+                                        "Like Count": st.column_config.NumberColumn("Like Count", format="%d 👍"),
+                                        "Comment Count": st.column_config.NumberColumn("Comment Count", format="%d 💬"),
+                                        "Share Count": st.column_config.NumberColumn("Share Count", format="%d 🔁"),
+                                        "Collection Count": st.column_config.NumberColumn("Collection Count", format="%d 🔖"),
+                                    }
+                                )
+
+                    # Select requested columns matching Image 2 order
+                    preferred_order = [
+                        ("View Count", sel_view),
+                        ("Like Count", sel_like),
+                        ("Comment Count", sel_comment),
+                        ("Share Count", sel_share),
+                        ("Collection Count", sel_collect),
+                        ("Release Time", sel_time),
+                        ("Uploader", sel_uploader),
+                        ("Title", sel_title),
+                        ("url", True),
+                    ]
+                    active_cols = [col for col, active in preferred_order if active and col in df_raw_tt.columns]
+                    df_display_tt = df_raw_tt[active_cols] if active_cols else df_raw_tt
+
+                    st.markdown("### 📋 Full Scraped TikTok Data (Image 2 Format)")
+                    st.dataframe(
+                        df_display_tt,
+                        use_container_width=True,
+                        column_config={
+                            "url": st.column_config.LinkColumn("url", help="Click to open link in new tab"),
+                            "View Count": st.column_config.NumberColumn("View Count", format="%d"),
+                            "Like Count": st.column_config.NumberColumn("Like Count", format="%d"),
+                            "Comment Count": st.column_config.NumberColumn("Comment Count", format="%d"),
+                            "Share Count": st.column_config.NumberColumn("Share Count", format="%d"),
+                            "Collection Count": st.column_config.NumberColumn("Collection Count", format="%d"),
+                        }
+                    )
+
+                    # Formatted Excel Export with openpyxl styling
+                    excel_buffer_tt = create_excel_download_buffer(df_display_tt, sheet_name='TikTok Data')
+                    timestamp_tt = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    file_name_excel_tt = f"tiktok_scraped_data_{timestamp_tt}.xlsx"
+                    file_name_csv_tt = f"tiktok_scraped_data_{timestamp_tt}.csv"
+
+                    col_dl1_tt, col_dl2_tt = st.columns(2)
+                    with col_dl1_tt:
+                        st.download_button(
+                            label="📊 Download Formatted Excel (.xlsx)",
+                            data=excel_buffer_tt,
+                            file_name=file_name_excel_tt,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="tt_dl_excel"
+                        )
+
+                    csv_bytes_tt = df_display_tt.to_csv(index=False).encode("utf-8-sig")
+                    with col_dl2_tt:
+                        st.download_button(
+                            label="📄 Download CSV (UTF-8 BOM)",
+                            data=csv_bytes_tt,
+                            file_name=file_name_csv_tt,
+                            mime="text/csv",
+                            key="tt_dl_csv"
+                        )
+                except Exception as e:
+                    st.error(f"Error scraping TikTok: {e}")
+            else:
+                st.warning("Please enter at least one TikTok URL.")
+
 
