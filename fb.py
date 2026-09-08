@@ -9,6 +9,12 @@ import base64
 import io
 import gc
 import glob
+import threading
+import platform
+import zipfile
+import urllib.request
+import json
+import ssl
 from queue import Queue
 import pandas as pd
 import streamlit as st
@@ -93,6 +99,133 @@ S_UNIT_B1 = _k("Nq1W/A==")
 S_UNIT_B2 = _k("Nq1Wwg==")
 
 
+_chrome_lock = threading.Lock()
+_cached_binaries = None
+
+
+def ensure_chrome_binaries(verbose=False):
+    """
+    Ensure Chrome and ChromeDriver are available.
+    1. Check cached portable binaries in /tmp/chrome_bin.
+    2. Check standard system locations.
+    3. If running on Linux and not found, dynamically download Chrome for Testing & ChromeDriver.
+    """
+    global _cached_binaries
+    if _cached_binaries and os.path.isfile(_cached_binaries[0]) and os.path.isfile(_cached_binaries[1]):
+        return _cached_binaries
+
+    with _chrome_lock:
+        if _cached_binaries and os.path.isfile(_cached_binaries[0]) and os.path.isfile(_cached_binaries[1]):
+            return _cached_binaries
+
+        base_dir = "/tmp/chrome_bin"
+        chrome_local = os.path.join(base_dir, "chrome-linux64", "chrome")
+        driver_local = os.path.join(base_dir, "chromedriver-linux64", "chromedriver")
+
+        # 1. Check cached portable Chrome for Testing
+        if os.path.isfile(chrome_local) and os.path.isfile(driver_local):
+            try:
+                os.chmod(chrome_local, 0o755)
+                os.chmod(driver_local, 0o755)
+            except Exception:
+                pass
+            _cached_binaries = (chrome_local, driver_local)
+            return _cached_binaries
+
+        # 2. Check standard system locations
+        system_chrome = (
+            shutil.which(S_CHROMIUM)
+            or shutil.which(S_CHROMIUM_BROWSER)
+            or shutil.which(S_GOOGLE_CHROME)
+            or (S_USR_CHROMIUM if os.path.exists(S_USR_CHROMIUM) else None)
+            or ("/usr/bin/google-chrome" if os.path.exists("/usr/bin/google-chrome") else None)
+        )
+        system_driver = (
+            shutil.which(S_CHROMEDRIVER)
+            or shutil.which(S_CHROMIUM_DRIVER)
+            or (S_USR_CHROMEDRIVER if os.path.exists(S_USR_CHROMEDRIVER) else None)
+        )
+
+        if system_chrome and system_driver and os.path.exists(system_chrome) and os.path.exists(system_driver):
+            _cached_binaries = (system_chrome, system_driver)
+            return _cached_binaries
+
+        # 3. Dynamic download Chrome for Testing for Linux 64-bit
+        if platform.system().lower() == "linux":
+            try:
+                os.makedirs(base_dir, exist_ok=True)
+                chrome_url = None
+                driver_url = None
+
+                ssl_ctx = ssl.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = ssl.CERT_NONE
+
+                def _download_file(url, target_path):
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, context=ssl_ctx, timeout=60) as resp, open(target_path, "wb") as f:
+                        shutil.copyfileobj(resp, f)
+
+                # Query Google Chrome Labs API for latest stable releases
+                try:
+                    api_url = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+                    req = urllib.request.Request(api_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, context=ssl_ctx, timeout=10) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        stable = data.get("channels", {}).get("Stable", {}).get("downloads", {})
+                        for item in stable.get("chrome", []):
+                            if item.get("platform") == "linux64":
+                                chrome_url = item.get("url")
+                        for item in stable.get("chromedriver", []):
+                            if item.get("platform") == "linux64":
+                                driver_url = item.get("url")
+                except Exception:
+                    pass
+
+                # Fallback pinned stable URLs if Google Chrome Labs API is unreachable
+                if not chrome_url:
+                    chrome_url = "https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.82/linux64/chrome-linux64.zip"
+                if not driver_url:
+                    driver_url = "https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.82/linux64/chromedriver-linux64.zip"
+
+                # Download & extract Chrome for Testing
+                if not os.path.isfile(chrome_local):
+                    chrome_zip = os.path.join(base_dir, "chrome-linux64.zip")
+                    _download_file(chrome_url, chrome_zip)
+                    with zipfile.ZipFile(chrome_zip, "r") as z:
+                        z.extractall(base_dir)
+                    if os.path.exists(chrome_zip):
+                        os.remove(chrome_zip)
+
+                # Download & extract ChromeDriver
+                if not os.path.isfile(driver_local):
+                    driver_zip = os.path.join(base_dir, "chromedriver-linux64.zip")
+                    _download_file(driver_url, driver_zip)
+                    with zipfile.ZipFile(driver_zip, "r") as z:
+                        z.extractall(base_dir)
+                    if os.path.exists(driver_zip):
+                        os.remove(driver_zip)
+
+                # Grant execution permissions to extracted binaries
+                for root, _, files in os.walk(base_dir):
+                    for f in files:
+                        try:
+                            fpath = os.path.join(root, f)
+                            os.chmod(fpath, 0o755)
+                        except Exception:
+                            pass
+
+                if os.path.isfile(chrome_local) and os.path.isfile(driver_local):
+                    _cached_binaries = (chrome_local, driver_local)
+                    return _cached_binaries
+            except Exception as e:
+                if verbose:
+                    st.warning(f"Dynamic Chrome download notice: {e}")
+
+        _cached_binaries = (system_chrome, system_driver)
+        return _cached_binaries
+
+
 def setup_driver(verbose=False):
     options = Options()
 
@@ -123,30 +256,18 @@ def setup_driver(verbose=False):
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
 
-    chromium_path = (
-        shutil.which(S_CHROMIUM)
-        or shutil.which(S_CHROMIUM_BROWSER)
-        or shutil.which(S_GOOGLE_CHROME)
-        or S_USR_CHROMIUM
-    )
-    driver_path = (
-        shutil.which(S_CHROMEDRIVER)
-        or shutil.which(S_CHROMIUM_DRIVER)
-        or S_USR_CHROMEDRIVER
-    )
+    chrome_path, driver_path = ensure_chrome_binaries(verbose=verbose)
+
+    if chrome_path and os.path.exists(chrome_path):
+        options.binary_location = chrome_path
+
+    if driver_path and os.path.exists(driver_path):
+        service = Service(executable_path=driver_path, log_output=subprocess.STDOUT)
+    else:
+        service = Service(log_output=subprocess.STDOUT)
 
     if verbose:
-        st.caption(f"Chromium: `{chromium_path}` | exists: {os.path.exists(chromium_path)}")
-        st.caption(f"Chromedriver: `{driver_path}` | exists: {os.path.exists(driver_path)}")
-
-    if not os.path.exists(chromium_path) or not os.path.exists(driver_path):
-        raise FileNotFoundError(
-            "Chromium or Chromedriver not found on system. "
-            "Please check packages.txt for chromium and chromium-driver."
-        )
-
-    options.binary_location = chromium_path
-    service = Service(driver_path, log_output=subprocess.STDOUT)
+        st.caption(f"Chrome Binary: `{chrome_path}` | ChromeDriver: `{driver_path}`")
 
     try:
         driver = webdriver.Chrome(service=service, options=options)
@@ -154,7 +275,6 @@ def setup_driver(verbose=False):
         if verbose:
             st.warning(f"First attempt failed ({e}). Retrying with single-process mode...")
         options.add_argument("--single-process")
-        service = Service(driver_path, log_output=subprocess.STDOUT)
         driver = webdriver.Chrome(service=service, options=options)
 
     try:
@@ -170,6 +290,7 @@ def setup_driver(verbose=False):
         pass
 
     return driver
+
 
 
 
@@ -526,12 +647,15 @@ def get_process_memory_mb():
         return 0.0
 
 
-def scrape_facebook_full_stats(urls, max_workers=5, metrics_container=None, progress_bar=None):
+def scrape_facebook_full_stats(urls, max_workers=2, metrics_container=None, progress_bar=None):
     # Feature 3: URL Sanitization, Normalization & Deduplication
     clean_urls = list(dict.fromkeys([sanitize_facebook_url(u) for u in urls if u and u.strip()]))
     num_urls = len(clean_urls)
     if num_urls == 0:
         return []
+
+    # Pre-warm & ensure Chrome binaries in main thread before spawning worker threads
+    ensure_chrome_binaries()
 
     url_queue = Queue()
     result_queue = Queue()
@@ -544,9 +668,21 @@ def scrape_facebook_full_stats(urls, max_workers=5, metrics_container=None, prog
     results_map = {}
 
     def worker_loop():
-        driver = setup_driver(verbose=False)
+        driver = None
         processed_count = 0
         try:
+            try:
+                driver = setup_driver(verbose=False)
+            except Exception as e:
+                while not url_queue.empty():
+                    try:
+                        u = url_queue.get_nowait()
+                        result_queue.put((u, {"url": u, "post_date": "N/A", "views": None, "likes": None, "comments": None, "shares": None, "error": str(e)}))
+                        url_queue.task_done()
+                    except Exception:
+                        break
+                return
+
             while not url_queue.empty():
                 try:
                     url = url_queue.get_nowait()
@@ -578,10 +714,12 @@ def scrape_facebook_full_stats(urls, max_workers=5, metrics_container=None, prog
                 processed_count += 1
                 url_queue.task_done()
         finally:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+
 
 
     num_threads = min(max_workers, num_urls)
@@ -671,7 +809,13 @@ if __name__ == "__main__":
             key="fb_url_input"
         )
 
-        if st.button("Start Facebook Scraping", key="fb_start_btn"):
+        col_fb_btn1, col_fb_btn2 = st.columns([3, 1])
+        with col_fb_btn1:
+            start_clicked_fb = st.button("Start Facebook Scraping", key="fb_start_btn", type="primary")
+        with col_fb_btn2:
+            workers_fb = st.number_input("Workers / Concurrency", min_value=1, max_value=4, value=2, key="fb_workers_input")
+
+        if start_clicked_fb:
             urls_fb = [url.strip() for url in input_text_fb.split("\n") if url.strip()]
             if urls_fb:
                 metrics_container_fb = st.empty()
@@ -680,81 +824,95 @@ if __name__ == "__main__":
                 try:
                     start_time_fb = time.time()
                     final_output_fb = scrape_facebook_full_stats(
-                        urls_fb, metrics_container=metrics_container_fb, progress_bar=progress_bar_fb
+                        urls_fb, max_workers=workers_fb, metrics_container=metrics_container_fb, progress_bar=progress_bar_fb
                     )
                     elapsed_fb = time.time() - start_time_fb
-                    avg_speed_fb = elapsed_fb / len(urls_fb) if len(urls_fb) > 0 else 0
-
                     progress_bar_fb.empty()
+                    metrics_container_fb.empty()
 
-                    with metrics_container_fb.container():
-                        col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("📋 Total Tasks", len(urls_fb))
-                        col2.metric("✅ Completed Tasks", f"{len(final_output_fb)} / {len(urls_fb)}")
-                        col3.metric("⏱️ Total Time", f"{elapsed_fb:.2f}s")
-                        col4.metric("⚡ Avg Speed", f"{avg_speed_fb:.2f}s / task")
-
+                    st.session_state["fb_results"] = {
+                        "output": final_output_fb,
+                        "elapsed": elapsed_fb,
+                        "count": len(urls_fb)
+                    }
                     st.success(f"Successfully processed {len(urls_fb)} task(s) in {elapsed_fb:.2f} seconds!")
-
-                    df_fb = pd.DataFrame(final_output_fb)
-
-                    # Feature 4A: Top 5 Viral Videos Dashboard
-                    if not df_fb.empty and "views" in df_fb.columns:
-                        valid_views_fb = df_fb[df_fb["views"].notna()].sort_values(by="views", ascending=False)
-                        if not valid_views_fb.empty:
-                            with st.expander("🏆 **Top 5 Viral Videos (Highest Views)**", expanded=True):
-                                st.dataframe(
-                                    valid_views_fb.head(5),
-                                    use_container_width=True,
-                                    column_config={
-                                        "url": st.column_config.LinkColumn("url", help="Click to open link"),
-                                        "views": st.column_config.NumberColumn("views", format="%d 👁️"),
-                                        "likes": st.column_config.NumberColumn("likes", format="%d 👍"),
-                                        "comments": st.column_config.NumberColumn("comments", format="%d 💬"),
-                                        "shares": st.column_config.NumberColumn("shares", format="%d 🔁"),
-                                    }
-                                )
-
-                    st.markdown("### 📋 Full Scraped Facebook Data")
-                    st.dataframe(
-                        df_fb,
-                        use_container_width=True,
-                        column_config={
-                            "url": st.column_config.LinkColumn("url", help="Click to open link in new tab")
-                        }
-                    )
-
-                    # Export formatted Excel & CSV
-                    excel_buffer_fb = create_excel_download_buffer(df_fb, sheet_name='Facebook Data')
-                    timestamp_fb = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    file_name_excel_fb = f"fb_scraped_data_{timestamp_fb}.xlsx"
-                    file_name_csv_fb = f"fb_scraped_data_{timestamp_fb}.csv"
-
-                    col_dl1_fb, col_dl2_fb = st.columns(2)
-                    with col_dl1_fb:
-                        st.download_button(
-                            label="📊 Download Formatted Excel (.xlsx)",
-                            data=excel_buffer_fb,
-                            file_name=file_name_excel_fb,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="fb_dl_excel"
-                        )
-
-                    csv_bytes_fb = df_fb.to_csv(index=False).encode("utf-8-sig")
-                    with col_dl2_fb:
-                        st.download_button(
-                            label="📄 Download CSV (UTF-8 BOM)",
-                            data=csv_bytes_fb,
-                            file_name=file_name_csv_fb,
-                            mime="text/csv",
-                            key="fb_dl_csv"
-                        )
-                except FileNotFoundError as e:
-                    st.error(str(e))
                 except Exception as e:
                     st.error(f"Browser error: {e}")
             else:
                 st.warning("Please enter at least one URL.")
+
+        # Render persistent Facebook results
+        if st.session_state.get("fb_results"):
+            fb_res = st.session_state["fb_results"]
+            final_output_fb = fb_res["output"]
+            elapsed_fb = fb_res["elapsed"]
+            total_tasks_fb = fb_res["count"]
+            avg_speed_fb = elapsed_fb / total_tasks_fb if total_tasks_fb > 0 else 0
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("📋 Total Tasks", total_tasks_fb)
+            col2.metric("✅ Completed Tasks", f"{len(final_output_fb)} / {total_tasks_fb}")
+            col3.metric("⏱️ Total Time", f"{elapsed_fb:.2f}s")
+            col4.metric("⚡ Avg Speed", f"{avg_speed_fb:.2f}s / task")
+
+            df_fb = pd.DataFrame(final_output_fb)
+
+            # Feature 4A: Top 5 Viral Videos Dashboard
+            if not df_fb.empty and "views" in df_fb.columns:
+                valid_views_fb = df_fb[df_fb["views"].notna()].sort_values(by="views", ascending=False)
+                if not valid_views_fb.empty:
+                    with st.expander("🏆 **Top 5 Viral Videos (Highest Views)**", expanded=True):
+                        st.dataframe(
+                            valid_views_fb.head(5),
+                            use_container_width=True,
+                            column_config={
+                                "url": st.column_config.LinkColumn("url", help="Click to open link"),
+                                "views": st.column_config.NumberColumn("views", format="%d 👁️"),
+                                "likes": st.column_config.NumberColumn("likes", format="%d 👍"),
+                                "comments": st.column_config.NumberColumn("comments", format="%d 💬"),
+                                "shares": st.column_config.NumberColumn("shares", format="%d 🔁"),
+                            }
+                        )
+
+            st.markdown("### 📋 Full Scraped Facebook Data")
+            st.dataframe(
+                df_fb,
+                use_container_width=True,
+                column_config={
+                    "url": st.column_config.LinkColumn("url", help="Click to open link in new tab")
+                }
+            )
+
+            # Export formatted Excel & CSV
+            excel_buffer_fb = create_excel_download_buffer(df_fb, sheet_name='Facebook Data')
+            timestamp_fb = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_name_excel_fb = f"fb_scraped_data_{timestamp_fb}.xlsx"
+            file_name_csv_fb = f"fb_scraped_data_{timestamp_fb}.csv"
+
+            col_dl1_fb, col_dl2_fb, col_dl3_fb = st.columns([2, 2, 1])
+            with col_dl1_fb:
+                st.download_button(
+                    label="📊 Download Formatted Excel (.xlsx)",
+                    data=excel_buffer_fb,
+                    file_name=file_name_excel_fb,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="fb_dl_excel"
+                )
+
+            csv_bytes_fb = df_fb.to_csv(index=False).encode("utf-8-sig")
+            with col_dl2_fb:
+                st.download_button(
+                    label="📄 Download CSV (UTF-8 BOM)",
+                    data=csv_bytes_fb,
+                    file_name=file_name_csv_fb,
+                    mime="text/csv",
+                    key="fb_dl_csv"
+                )
+
+            with col_dl3_fb:
+                if st.button("🗑️ Clear Results", key="fb_clear_results"):
+                    del st.session_state["fb_results"]
+                    st.rerun()
 
     with tab_tt:
         st.subheader("TikTok Video Data Retrieval")
@@ -800,97 +958,114 @@ if __name__ == "__main__":
                         urls_tt, progress_bar=progress_bar_tt, metrics_container=metrics_container_tt
                     )
                     elapsed_tt = time.time() - start_time_tt
-                    avg_speed_tt = elapsed_tt / len(urls_tt) if len(urls_tt) > 0 else 0
-
                     progress_bar_tt.empty()
+                    metrics_container_tt.empty()
 
-                    with metrics_container_tt.container():
-                        col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("📋 Total Tasks", len(urls_tt))
-                        col2.metric("✅ Completed Tasks", f"{len(final_output_tt)} / {len(urls_tt)}")
-                        col3.metric("⏱️ Total Time", f"{elapsed_tt:.2f}s")
-                        col4.metric("⚡ Avg Speed", f"{avg_speed_tt:.2f}s / task")
-
+                    st.session_state["tt_results"] = {
+                        "output": final_output_tt,
+                        "elapsed": elapsed_tt,
+                        "count": len(urls_tt)
+                    }
                     st.success(f"Successfully processed {len(urls_tt)} TikTok task(s) in {elapsed_tt:.2f} seconds!")
-
-                    df_raw_tt = pd.DataFrame(final_output_tt)
-
-                    # Top 5 Viral TikTok Videos Dashboard
-                    if not df_raw_tt.empty and "View Count" in df_raw_tt.columns:
-                        valid_views_tt = df_raw_tt[df_raw_tt["View Count"].notna()].sort_values(by="View Count", ascending=False)
-                        if not valid_views_tt.empty:
-                            with st.expander("🏆 **Top 5 Viral TikTok Videos (Highest Views)**", expanded=True):
-                                viral_cols = [c for c in ["url", "Uploader", "View Count", "Like Count", "Comment Count", "Share Count", "Collection Count", "Release Time"] if c in valid_views_tt.columns]
-                                st.dataframe(
-                                    valid_views_tt.head(5)[viral_cols],
-                                    use_container_width=True,
-                                    column_config={
-                                        "url": st.column_config.LinkColumn("url", help="Click to open video link"),
-                                        "View Count": st.column_config.NumberColumn("View Count", format="%d 👁️"),
-                                        "Like Count": st.column_config.NumberColumn("Like Count", format="%d 👍"),
-                                        "Comment Count": st.column_config.NumberColumn("Comment Count", format="%d 💬"),
-                                        "Share Count": st.column_config.NumberColumn("Share Count", format="%d 🔁"),
-                                        "Collection Count": st.column_config.NumberColumn("Collection Count", format="%d 🔖"),
-                                    }
-                                )
-
-                    # Select requested columns matching Image 2 order
-                    preferred_order = [
-                        ("View Count", sel_view),
-                        ("Like Count", sel_like),
-                        ("Comment Count", sel_comment),
-                        ("Share Count", sel_share),
-                        ("Collection Count", sel_collect),
-                        ("Release Time", sel_time),
-                        ("Uploader", sel_uploader),
-                        ("Title", sel_title),
-                        ("url", True),
-                    ]
-                    active_cols = [col for col, active in preferred_order if active and col in df_raw_tt.columns]
-                    df_display_tt = df_raw_tt[active_cols] if active_cols else df_raw_tt
-
-                    st.markdown("### 📋 Full Scraped TikTok Data (Image 2 Format)")
-                    st.dataframe(
-                        df_display_tt,
-                        use_container_width=True,
-                        column_config={
-                            "url": st.column_config.LinkColumn("url", help="Click to open link in new tab"),
-                            "View Count": st.column_config.NumberColumn("View Count", format="%d"),
-                            "Like Count": st.column_config.NumberColumn("Like Count", format="%d"),
-                            "Comment Count": st.column_config.NumberColumn("Comment Count", format="%d"),
-                            "Share Count": st.column_config.NumberColumn("Share Count", format="%d"),
-                            "Collection Count": st.column_config.NumberColumn("Collection Count", format="%d"),
-                        }
-                    )
-
-                    # Formatted Excel Export with openpyxl styling
-                    excel_buffer_tt = create_excel_download_buffer(df_display_tt, sheet_name='TikTok Data')
-                    timestamp_tt = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    file_name_excel_tt = f"tiktok_scraped_data_{timestamp_tt}.xlsx"
-                    file_name_csv_tt = f"tiktok_scraped_data_{timestamp_tt}.csv"
-
-                    col_dl1_tt, col_dl2_tt = st.columns(2)
-                    with col_dl1_tt:
-                        st.download_button(
-                            label="📊 Download Formatted Excel (.xlsx)",
-                            data=excel_buffer_tt,
-                            file_name=file_name_excel_tt,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="tt_dl_excel"
-                        )
-
-                    csv_bytes_tt = df_display_tt.to_csv(index=False).encode("utf-8-sig")
-                    with col_dl2_tt:
-                        st.download_button(
-                            label="📄 Download CSV (UTF-8 BOM)",
-                            data=csv_bytes_tt,
-                            file_name=file_name_csv_tt,
-                            mime="text/csv",
-                            key="tt_dl_csv"
-                        )
                 except Exception as e:
                     st.error(f"Error scraping TikTok: {e}")
             else:
                 st.warning("Please enter at least one TikTok URL.")
+
+        # Render persistent TikTok results
+        if st.session_state.get("tt_results"):
+            tt_res = st.session_state["tt_results"]
+            final_output_tt = tt_res["output"]
+            elapsed_tt = tt_res["elapsed"]
+            total_tasks_tt = tt_res["count"]
+            avg_speed_tt = elapsed_tt / total_tasks_tt if total_tasks_tt > 0 else 0
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("📋 Total Tasks", total_tasks_tt)
+            col2.metric("✅ Completed Tasks", f"{len(final_output_tt)} / {total_tasks_tt}")
+            col3.metric("⏱️ Total Time", f"{elapsed_tt:.2f}s")
+            col4.metric("⚡ Avg Speed", f"{avg_speed_tt:.2f}s / task")
+
+            df_raw_tt = pd.DataFrame(final_output_tt)
+
+            # Top 5 Viral TikTok Videos Dashboard
+            if not df_raw_tt.empty and "View Count" in df_raw_tt.columns:
+                valid_views_tt = df_raw_tt[df_raw_tt["View Count"].notna()].sort_values(by="View Count", ascending=False)
+                if not valid_views_tt.empty:
+                    with st.expander("🏆 **Top 5 Viral TikTok Videos (Highest Views)**", expanded=True):
+                        viral_cols = [c for c in ["url", "Uploader", "View Count", "Like Count", "Comment Count", "Share Count", "Collection Count", "Release Time"] if c in valid_views_tt.columns]
+                        st.dataframe(
+                            valid_views_tt.head(5)[viral_cols],
+                            use_container_width=True,
+                            column_config={
+                                "url": st.column_config.LinkColumn("url", help="Click to open video link"),
+                                "View Count": st.column_config.NumberColumn("View Count", format="%d 👁️"),
+                                "Like Count": st.column_config.NumberColumn("Like Count", format="%d 👍"),
+                                "Comment Count": st.column_config.NumberColumn("Comment Count", format="%d 💬"),
+                                "Share Count": st.column_config.NumberColumn("Share Count", format="%d 🔁"),
+                                "Collection Count": st.column_config.NumberColumn("Collection Count", format="%d 🔖"),
+                            }
+                        )
+
+            # Select requested columns matching Image 2 order
+            preferred_order = [
+                ("View Count", sel_view),
+                ("Like Count", sel_like),
+                ("Comment Count", sel_comment),
+                ("Share Count", sel_share),
+                ("Collection Count", sel_collect),
+                ("Release Time", sel_time),
+                ("Uploader", sel_uploader),
+                ("Title", sel_title),
+                ("url", True),
+            ]
+            active_cols = [col for col, active in preferred_order if active and col in df_raw_tt.columns]
+            df_display_tt = df_raw_tt[active_cols] if active_cols else df_raw_tt
+
+            st.markdown("### 📋 Full Scraped TikTok Data (Image 2 Format)")
+            st.dataframe(
+                df_display_tt,
+                use_container_width=True,
+                column_config={
+                    "url": st.column_config.LinkColumn("url", help="Click to open link in new tab"),
+                    "View Count": st.column_config.NumberColumn("View Count", format="%d"),
+                    "Like Count": st.column_config.NumberColumn("Like Count", format="%d"),
+                    "Comment Count": st.column_config.NumberColumn("Comment Count", format="%d"),
+                    "Share Count": st.column_config.NumberColumn("Share Count", format="%d"),
+                    "Collection Count": st.column_config.NumberColumn("Collection Count", format="%d"),
+                }
+            )
+
+            # Formatted Excel Export with openpyxl styling
+            excel_buffer_tt = create_excel_download_buffer(df_display_tt, sheet_name='TikTok Data')
+            timestamp_tt = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_name_excel_tt = f"tiktok_scraped_data_{timestamp_tt}.xlsx"
+            file_name_csv_tt = f"tiktok_scraped_data_{timestamp_tt}.csv"
+
+            col_dl1_tt, col_dl2_tt, col_dl3_tt = st.columns([2, 2, 1])
+            with col_dl1_tt:
+                st.download_button(
+                    label="📊 Download Formatted Excel (.xlsx)",
+                    data=excel_buffer_tt,
+                    file_name=file_name_excel_tt,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="tt_dl_excel"
+                )
+
+            csv_bytes_tt = df_display_tt.to_csv(index=False).encode("utf-8-sig")
+            with col_dl2_tt:
+                st.download_button(
+                    label="📄 Download CSV (UTF-8 BOM)",
+                    data=csv_bytes_tt,
+                    file_name=file_name_csv_tt,
+                    mime="text/csv",
+                    key="tt_dl_csv"
+                )
+
+            with col_dl3_tt:
+                if st.button("🗑️ Clear Results", key="tt_clear_results"):
+                    del st.session_state["tt_results"]
+                    st.rerun()
+
 
 
