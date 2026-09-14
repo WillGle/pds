@@ -103,54 +103,84 @@ _chrome_lock = threading.Lock()
 _cached_binaries = None
 
 
+def is_usable_binary(path):
+    if not path or not os.path.isfile(path):
+        return False
+    try:
+        os.chmod(path, 0o755)
+    except Exception:
+        pass
+    try:
+        res = subprocess.run(
+            [path, "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5
+        )
+        return res.returncode == 0
+    except Exception:
+        return False
+
+
 def ensure_chrome_binaries(verbose=False):
     """
     Ensure Chrome and ChromeDriver are available.
-    1. Check cached portable binaries in /tmp/chrome_bin.
-    2. Check standard system locations.
+    1. Check standard system locations first (installed via apt from packages.txt or system package manager).
+    2. Check cached portable binaries in /tmp/chrome_bin (verifying usability).
     3. If running on Linux and not found, dynamically download Chrome for Testing & ChromeDriver.
     """
     global _cached_binaries
-    if _cached_binaries and os.path.isfile(_cached_binaries[0]) and os.path.isfile(_cached_binaries[1]):
+    if _cached_binaries and is_usable_binary(_cached_binaries[0]) and is_usable_binary(_cached_binaries[1]):
         return _cached_binaries
 
     with _chrome_lock:
-        if _cached_binaries and os.path.isfile(_cached_binaries[0]) and os.path.isfile(_cached_binaries[1]):
+        if _cached_binaries and is_usable_binary(_cached_binaries[0]) and is_usable_binary(_cached_binaries[1]):
             return _cached_binaries
 
+        # 1. Check standard system locations first (priority: Debian/Ubuntu apt packages from packages.txt)
+        system_chrome_candidates = [
+            shutil.which(S_CHROMIUM),
+            shutil.which(S_CHROMIUM_BROWSER),
+            shutil.which(S_GOOGLE_CHROME),
+            shutil.which("google-chrome-stable"),
+            S_USR_CHROMIUM,
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+        ]
+        system_driver_candidates = [
+            shutil.which(S_CHROMEDRIVER),
+            shutil.which(S_CHROMIUM_DRIVER),
+            S_USR_CHROMEDRIVER,
+            "/usr/bin/chromedriver",
+            "/usr/bin/chromium-driver",
+        ]
+
+        system_chrome = next((c for c in system_chrome_candidates if is_usable_binary(c)), None)
+        system_driver = next((d for d in system_driver_candidates if is_usable_binary(d)), None)
+
+        if system_chrome and system_driver:
+            _cached_binaries = (system_chrome, system_driver)
+            return _cached_binaries
+
+        # 2. Check cached portable Chrome for Testing in /tmp/chrome_bin
         base_dir = "/tmp/chrome_bin"
         chrome_local = os.path.join(base_dir, "chrome-linux64", "chrome")
         driver_local = os.path.join(base_dir, "chromedriver-linux64", "chromedriver")
 
-        # 1. Check cached portable Chrome for Testing
-        if os.path.isfile(chrome_local) and os.path.isfile(driver_local):
-            try:
-                os.chmod(chrome_local, 0o755)
-                os.chmod(driver_local, 0o755)
-            except Exception:
-                pass
+        if is_usable_binary(chrome_local) and is_usable_binary(driver_local):
             _cached_binaries = (chrome_local, driver_local)
             return _cached_binaries
 
-        # 2. Check standard system locations
-        system_chrome = (
-            shutil.which(S_CHROMIUM)
-            or shutil.which(S_CHROMIUM_BROWSER)
-            or shutil.which(S_GOOGLE_CHROME)
-            or (S_USR_CHROMIUM if os.path.exists(S_USR_CHROMIUM) else None)
-            or ("/usr/bin/google-chrome" if os.path.exists("/usr/bin/google-chrome") else None)
-        )
-        system_driver = (
-            shutil.which(S_CHROMEDRIVER)
-            or shutil.which(S_CHROMIUM_DRIVER)
-            or (S_USR_CHROMEDRIVER if os.path.exists(S_USR_CHROMEDRIVER) else None)
-        )
+        # If /tmp/chrome_bin exists but binaries are broken (e.g. exit 127 due to missing libraries), clean it up
+        if os.path.exists(base_dir):
+            try:
+                shutil.rmtree(base_dir, ignore_errors=True)
+            except Exception:
+                pass
 
-        if system_chrome and system_driver and os.path.exists(system_chrome) and os.path.exists(system_driver):
-            _cached_binaries = (system_chrome, system_driver)
-            return _cached_binaries
-
-        # 3. Dynamic download Chrome for Testing for Linux 64-bit
+        # 3. Dynamic download Chrome for Testing for Linux 64-bit (fallback)
         if platform.system().lower() == "linux":
             try:
                 os.makedirs(base_dir, exist_ok=True)
@@ -184,9 +214,9 @@ def ensure_chrome_binaries(verbose=False):
 
                 # Fallback pinned stable URLs if Google Chrome Labs API is unreachable
                 if not chrome_url:
-                    chrome_url = "https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.82/linux64/chrome-linux64.zip"
+                    chrome_url = "https://storage.googleapis.com/chrome-for-testing-public/124.0.6367.91/linux64/chrome-linux64.zip"
                 if not driver_url:
-                    driver_url = "https://storage.googleapis.com/chrome-for-testing-public/152.0.7977.82/linux64/chromedriver-linux64.zip"
+                    driver_url = "https://storage.googleapis.com/chrome-for-testing-public/124.0.6367.91/linux64/chromedriver-linux64.zip"
 
                 # Download & extract Chrome for Testing
                 if not os.path.isfile(chrome_local):
@@ -215,12 +245,23 @@ def ensure_chrome_binaries(verbose=False):
                         except Exception:
                             pass
 
-                if os.path.isfile(chrome_local) and os.path.isfile(driver_local):
+                if is_usable_binary(chrome_local) and is_usable_binary(driver_local):
                     _cached_binaries = (chrome_local, driver_local)
                     return _cached_binaries
+                else:
+                    # Downloaded binary cannot execute (missing shared libraries on minimal Linux distro)
+                    shutil.rmtree(base_dir, ignore_errors=True)
             except Exception as e:
                 if verbose:
                     st.warning(f"Dynamic Chrome download notice: {e}")
+
+        # If still nothing valid
+        if not system_chrome or not system_driver:
+            raise RuntimeError(
+                "Không thể khởi chạy Chromium hoặc ChromeDriver (Status code 127 / thiếu thư viện hệ thống). "
+                "Vui lòng đảm bảo file 'packages.txt' chứa 'chromium' và 'chromium-driver' có trong thư mục gốc của repository, "
+                "sau đó vào menu 'Manage app' ở góc dưới bên phải Streamlit Cloud và chọn 'Reboot app'."
+            )
 
         _cached_binaries = (system_chrome, system_driver)
         return _cached_binaries
@@ -275,6 +316,7 @@ def setup_driver(verbose=False):
         if verbose:
             st.warning(f"First attempt failed ({e}). Retrying with single-process mode...")
         options.add_argument("--single-process")
+        service = Service(executable_path=driver_path, log_output=subprocess.STDOUT) if driver_path else Service(log_output=subprocess.STDOUT)
         driver = webdriver.Chrome(service=service, options=options)
 
     try:
@@ -856,6 +898,12 @@ if __name__ == "__main__":
             col4.metric("⚡ Avg Speed", f"{avg_speed_fb:.2f}s / task")
 
             df_fb = pd.DataFrame(final_output_fb)
+            if "error" in df_fb.columns and df_fb["error"].notna().any():
+                failed_items = df_fb["error"].notna().sum()
+                st.error(
+                    f"⚠️ Có {failed_items}/{total_tasks_fb} liên kết gặp lỗi khi thu thập dữ liệu. "
+                    "Nếu xuất hiện lỗi ChromeDriver hoặc Status code 127, vui lòng đảm bảo file 'packages.txt' có trong repository và vào menu 'Manage app' (góc phải dưới) bấm 'Reboot app'."
+                )
 
             # Feature 4A: Top 5 Viral Videos Dashboard
             if not df_fb.empty and "views" in df_fb.columns:
