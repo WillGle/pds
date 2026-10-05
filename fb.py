@@ -290,6 +290,11 @@ def setup_driver(verbose=False):
     options.add_argument("--disable-sync")
     options.add_argument("--metrics-recording-only")
 
+    # Suppress console logging & ResizeObserver flood
+    options.add_argument("--log-level=3")
+    options.add_argument("--silent")
+    options.add_experimental_option("excludeSwitches", ["enable-logging", "enable-automation"])
+
     options.add_argument("--window-size=1280,720")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument(
@@ -303,9 +308,9 @@ def setup_driver(verbose=False):
         options.binary_location = chrome_path
 
     if driver_path and os.path.exists(driver_path):
-        service = Service(executable_path=driver_path, log_output=subprocess.STDOUT)
+        service = Service(executable_path=driver_path, log_output=subprocess.DEVNULL)
     else:
-        service = Service(log_output=subprocess.STDOUT)
+        service = Service(log_output=subprocess.DEVNULL)
 
     if verbose:
         st.caption(f"Chrome Binary: `{chrome_path}` | ChromeDriver: `{driver_path}`")
@@ -316,7 +321,7 @@ def setup_driver(verbose=False):
         if verbose:
             st.warning(f"First attempt failed ({e}). Retrying with single-process mode...")
         options.add_argument("--single-process")
-        service = Service(executable_path=driver_path, log_output=subprocess.STDOUT) if driver_path else Service(log_output=subprocess.STDOUT)
+        service = Service(executable_path=driver_path, log_output=subprocess.DEVNULL) if driver_path else Service(log_output=subprocess.DEVNULL)
         driver = webdriver.Chrome(service=service, options=options)
 
     try:
@@ -324,8 +329,11 @@ def setup_driver(verbose=False):
         driver.execute_cdp_cmd('Network.setBlockedURLs', {
             "urls": [
                 "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ico",
-                "*.mp4", "*.webm", "*.mp3", "*.woff*", "*.ttf", "*.eot",
-                "*.css", "*connect.facebook.net*", "*google-analytics*", "*doubleclick*"
+                "*.mp4*", "*.webm*", "*.mp3*", "*.woff*", "*.ttf*", "*.eot*",
+                "*.css*", "*connect.facebook.net*", "*google-analytics*", "*doubleclick*",
+                "*.m4v*", "*.m3u8*", "*.ts*", "*.mpd*", "*facebook.com/ajax/bz*",
+                "*facebook.com/browser_reporting/*", "*facebook.com/ajax/browser_error_reports/*",
+                "*graph.facebook.com*"
             ]
         })
     except Exception:
@@ -601,14 +609,38 @@ def scrape_single_url(driver, original_url):
                 pass
 
         if raw_views == "N/A":
+            # Fast extraction from OpenGraph / Twitter meta tags
+            meta_m = re.search(r'<meta[^>]+(?:property=["\']og:title["\']|name=["\']twitter:title["\'])[^>]+content=["\']([^"\']+)["\']', ps)
+            if not meta_m:
+                meta_m = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property=["\']og:title["\']|name=["\']twitter:title["\'])', ps)
+            if meta_m:
+                meta_txt = meta_m.group(1)
+                vm = re.search(r'([\d.,]+\s*[kKmMbBtT]?)\s*(?:views|lượt xem)', meta_txt, re.IGNORECASE)
+                if vm:
+                    raw_views = vm.group(1)
+                if raw_likes == "N/A":
+                    lm = re.search(r'([\d.,]+\s*[kKmMbBtT]?)\s*(?:reactions|cảm xúc|lượt thích)', meta_txt, re.IGNORECASE)
+                    if lm:
+                        raw_likes = lm.group(1)
+
+        if raw_views == "N/A":
             try:
                 view_el = driver.find_element(By.CLASS_NAME, "_26fq")
                 raw_views = view_el.text.strip()
             except Exception:
                 pass
 
-        # Fallback: If ANY metric is missing (N/A), load watch_url to extract missing metrics
-        if raw_views == "N/A" or raw_likes == "N/A" or raw_comments == "N/A" or raw_shares == "N/A" or raw_post_date == "N/A":
+        # If interactive elements exist without count badge, default to 0 before deciding fallback
+        if not is_unavailable:
+            if raw_comments == "N/A" and has_comm_el:
+                raw_comments = "0"
+            if raw_shares == "N/A" and has_share_el:
+                raw_shares = "0"
+            if raw_likes == "N/A" and has_like_el:
+                raw_likes = "0"
+
+        # Fallback: Load watch_url ONLY if vital metrics are still missing
+        if raw_views == "N/A" or raw_post_date == "N/A" or (raw_likes == "N/A" and raw_comments == "N/A" and raw_shares == "N/A"):
             try:
                 watch_url = f"{S_WATCH_URL}{video_id}"
                 driver.get(watch_url)
