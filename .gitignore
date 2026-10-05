@@ -6,3 +6,4 @@ _debug_reel.py
 *.html
 logs/
 *.md
+.venv/
