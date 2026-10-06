@@ -378,45 +378,6 @@ export default function Home() {
     setTimeout(() => setCopiedType(null), 2000);
   };
 
-  // Copy as Markdown Table (for Markdown docs, Obsidian, GitHub, chat)
-  const copyMarkdownTable = async () => {
-    const isFb = activeTab === "facebook";
-    const data = isFb ? filteredFb : filteredTt;
-    if (data.length === 0) return;
-
-    const headers = isFb
-      ? ["Author", "Link", "Views", "Likes", "Comments", "Shares"]
-      : ["Author", "Link", "Views", "Likes", "Comments", "Shares", "Saves"];
-
-    const rawRows = isFb
-      ? filteredFb.map((item) => [
-          item.author || "—",
-          `[${formatShortLink(item.url)}](${item.url})`,
-          item.views !== null ? item.views.toLocaleString() : "0",
-          item.likes !== null ? item.likes.toLocaleString() : "0",
-          item.comments !== null ? item.comments.toLocaleString() : "0",
-          item.shares !== null ? item.shares.toLocaleString() : "0",
-        ])
-      : filteredTt.map((item) => [
-          item.author || "—",
-          `[${formatShortLink(item.url)}](${item.url})`,
-          item.views !== null ? item.views.toLocaleString() : "0",
-          item.likes !== null ? item.likes.toLocaleString() : "0",
-          item.comments !== null ? item.comments.toLocaleString() : "0",
-          item.shares !== null ? item.shares.toLocaleString() : "0",
-          item.saves !== null ? item.saves.toLocaleString() : "0",
-        ]);
-
-    const headerLine = `| ${headers.join(" | ")} |`;
-    const sepLine = `| ${headers.map((h) => (!["Author", "Link"].includes(h) ? "---:" : ":---")).join(" | ")} |`;
-    const bodyLines = rawRows.map((r) => `| ${r.join(" | ")} |`);
-
-    const mdContent = [headerLine, sepLine, ...bodyLines].join("\n");
-    await navigator.clipboard.writeText(mdContent);
-    setCopiedType("markdown");
-    setTimeout(() => setCopiedType(null), 2000);
-  };
-
   // Copy ONLY the numbers: Views, Likes, Comments, Shares, Saves
   const copyNumbersOnly = async () => {
     const isFb = activeTab === "facebook";
@@ -786,15 +747,6 @@ export default function Home() {
                 title="Copy table with header row"
               >
                 {copiedType === "headers" ? "✅ Copied (+Headers)!" : "📋 Copy (+Headers)"}
-              </button>
-
-              <button
-                id="copy-markdown-btn"
-                className="btn-secondary"
-                onClick={copyMarkdownTable}
-                title="Copy as GitHub / Markdown table format"
-              >
-                {copiedType === "markdown" ? "✅ Copied Markdown!" : "📋 Markdown Table"}
               </button>
 
               <button
