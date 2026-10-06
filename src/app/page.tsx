@@ -282,70 +282,175 @@ export default function Home() {
     return { total, totalViews, totalLikes };
   }, [ttResults]);
 
-  // Copy Author, Link, then the Numbers (TSV format for direct paste into Google Sheets)
-  const copyAuthorLinkNumbers = (withHeaders: boolean) => {
+  // Helper to escape HTML characters
+  const escapeHtml = (str: string) => {
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  };
+
+  // Write both rich text/html Table AND text/plain TSV to clipboard
+  const writeDualClipboard = async (tsv: string, htmlTable: string) => {
+    try {
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard && navigator.clipboard.write) {
+        const textBlob = new Blob([tsv], { type: "text/plain" });
+        const htmlBlob = new Blob([htmlTable], { type: "text/html" });
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/plain": textBlob,
+            "text/html": htmlBlob,
+          }),
+        ]);
+        return;
+      }
+    } catch (err) {
+      console.warn("ClipboardItem write failed, fallback to writeText:", err);
+    }
+    await navigator.clipboard.writeText(tsv);
+  };
+
+  // Copy Author, Link, then the Numbers (Dual HTML Table + TSV for instant pasting into Sheets, Excel, Docs, Notion)
+  const copyAuthorLinkNumbers = async (withHeaders: boolean) => {
     const isFb = activeTab === "facebook";
     const data = isFb ? filteredFb : filteredTt;
     if (data.length === 0) return;
 
-    let headers: string[];
-    let rows: string[][];
+    const headers = isFb
+      ? ["Author", "Link", "Views", "Likes", "Comments", "Shares"]
+      : ["Author", "Link", "Views", "Likes", "Comments", "Shares", "Saves"];
 
-    if (isFb) {
-      headers = ["Author", "Link", "Views", "Likes", "Comments", "Shares"];
-      rows = filteredFb.map((item) => [
-        item.author || "",
-        item.url || "",
-        item.views !== null ? String(item.views) : "0",
-        item.likes !== null ? String(item.likes) : "0",
-        item.comments !== null ? String(item.comments) : "0",
-        item.shares !== null ? String(item.shares) : "0",
-      ]);
-    } else {
-      headers = ["Author", "Link", "Views", "Likes", "Comments", "Shares", "Saves"];
-      rows = filteredTt.map((item) => [
-        item.author || "",
-        item.url || "",
-        item.views !== null ? String(item.views) : "0",
-        item.likes !== null ? String(item.likes) : "0",
-        item.comments !== null ? String(item.comments) : "0",
-        item.shares !== null ? String(item.shares) : "0",
-        item.saves !== null ? String(item.saves) : "0",
-      ]);
+    const rawRows = isFb
+      ? filteredFb.map((item) => ({
+          author: item.author || "—",
+          linkUrl: item.url,
+          linkText: formatShortLink(item.url),
+          nums: [
+            item.views !== null ? item.views : 0,
+            item.likes !== null ? item.likes : 0,
+            item.comments !== null ? item.comments : 0,
+            item.shares !== null ? item.shares : 0,
+          ],
+        }))
+      : filteredTt.map((item) => ({
+          author: item.author || "—",
+          linkUrl: item.url,
+          linkText: formatShortLink(item.url),
+          nums: [
+            item.views !== null ? item.views : 0,
+            item.likes !== null ? item.likes : 0,
+            item.comments !== null ? item.comments : 0,
+            item.shares !== null ? item.shares : 0,
+            item.saves !== null ? item.saves : 0,
+          ],
+        }));
+
+    // TSV for spreadsheet cells
+    const tsvRows = rawRows.map((r) => [r.author, r.linkUrl, ...r.nums.map(String)].join("\t"));
+    const tsvContent = (withHeaders ? [headers.join("\t"), ...tsvRows] : tsvRows).join("\r\n");
+
+    // HTML Table for rich text / documents / Google Sheets
+    let htmlTable = `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;border:1px solid #cbd5e1;">`;
+    if (withHeaders) {
+      htmlTable += `<thead><tr style="background:#f1f5f9;font-weight:bold;">`;
+      for (const h of headers) {
+        const isNum = !["Author", "Link"].includes(h);
+        htmlTable += `<th style="padding:6px 12px;border:1px solid #cbd5e1;${isNum ? "text-align:right;" : "text-align:left;"}">${escapeHtml(h)}</th>`;
+      }
+      htmlTable += `</tr></thead>`;
     }
+    htmlTable += `<tbody>`;
+    for (const r of rawRows) {
+      htmlTable += `<tr>`;
+      htmlTable += `<td style="padding:6px 12px;border:1px solid #cbd5e1;font-weight:500;">${escapeHtml(r.author)}</td>`;
+      htmlTable += `<td style="padding:6px 12px;border:1px solid #cbd5e1;"><a href="${escapeHtml(r.linkUrl)}">${escapeHtml(r.linkText)}</a></td>`;
+      for (const n of r.nums) {
+        htmlTable += `<td style="padding:6px 12px;border:1px solid #cbd5e1;text-align:right;">${n.toLocaleString()}</td>`;
+      }
+      htmlTable += `</tr>`;
+    }
+    htmlTable += `</tbody></table>`;
 
-    const tsvContent = withHeaders
-      ? [headers.join("\t"), ...rows.map((r) => r.join("\t"))].join("\n")
-      : rows.map((r) => r.join("\t")).join("\n");
-
-    navigator.clipboard.writeText(tsvContent);
+    await writeDualClipboard(tsvContent, htmlTable);
     setCopiedType(withHeaders ? "headers" : "values");
     setTimeout(() => setCopiedType(null), 2000);
   };
 
-  // Copy ONLY the numbers: Views, Likes, Comments, Shares, Saves
-  const copyNumbersOnly = () => {
+  // Copy as Markdown Table (for Markdown docs, Obsidian, GitHub, chat)
+  const copyMarkdownTable = async () => {
     const isFb = activeTab === "facebook";
     const data = isFb ? filteredFb : filteredTt;
     if (data.length === 0) return;
 
-    const rows = isFb
+    const headers = isFb
+      ? ["Author", "Link", "Views", "Likes", "Comments", "Shares"]
+      : ["Author", "Link", "Views", "Likes", "Comments", "Shares", "Saves"];
+
+    const rawRows = isFb
       ? filteredFb.map((item) => [
-          item.views !== null ? String(item.views) : "0",
-          item.likes !== null ? String(item.likes) : "0",
-          item.comments !== null ? String(item.comments) : "0",
-          item.shares !== null ? String(item.shares) : "0",
+          item.author || "—",
+          `[${formatShortLink(item.url)}](${item.url})`,
+          item.views !== null ? item.views.toLocaleString() : "0",
+          item.likes !== null ? item.likes.toLocaleString() : "0",
+          item.comments !== null ? item.comments.toLocaleString() : "0",
+          item.shares !== null ? item.shares.toLocaleString() : "0",
         ])
       : filteredTt.map((item) => [
-          item.views !== null ? String(item.views) : "0",
-          item.likes !== null ? String(item.likes) : "0",
-          item.comments !== null ? String(item.comments) : "0",
-          item.shares !== null ? String(item.shares) : "0",
-          item.saves !== null ? String(item.saves) : "0",
+          item.author || "—",
+          `[${formatShortLink(item.url)}](${item.url})`,
+          item.views !== null ? item.views.toLocaleString() : "0",
+          item.likes !== null ? item.likes.toLocaleString() : "0",
+          item.comments !== null ? item.comments.toLocaleString() : "0",
+          item.shares !== null ? item.shares.toLocaleString() : "0",
+          item.saves !== null ? item.saves.toLocaleString() : "0",
         ]);
 
-    const tsvContent = rows.map((r) => r.join("\t")).join("\n");
-    navigator.clipboard.writeText(tsvContent);
+    const headerLine = `| ${headers.join(" | ")} |`;
+    const sepLine = `| ${headers.map((h) => (!["Author", "Link"].includes(h) ? "---:" : ":---")).join(" | ")} |`;
+    const bodyLines = rawRows.map((r) => `| ${r.join(" | ")} |`);
+
+    const mdContent = [headerLine, sepLine, ...bodyLines].join("\n");
+    await navigator.clipboard.writeText(mdContent);
+    setCopiedType("markdown");
+    setTimeout(() => setCopiedType(null), 2000);
+  };
+
+  // Copy ONLY the numbers: Views, Likes, Comments, Shares, Saves
+  const copyNumbersOnly = async () => {
+    const isFb = activeTab === "facebook";
+    const data = isFb ? filteredFb : filteredTt;
+    if (data.length === 0) return;
+
+    const numRows = isFb
+      ? filteredFb.map((item) => [
+          item.views !== null ? item.views : 0,
+          item.likes !== null ? item.likes : 0,
+          item.comments !== null ? item.comments : 0,
+          item.shares !== null ? item.shares : 0,
+        ])
+      : filteredTt.map((item) => [
+          item.views !== null ? item.views : 0,
+          item.likes !== null ? item.likes : 0,
+          item.comments !== null ? item.comments : 0,
+          item.shares !== null ? item.shares : 0,
+          item.saves !== null ? item.saves : 0,
+        ]);
+
+    const tsvContent = numRows.map((r) => r.join("\t")).join("\r\n");
+
+    let htmlTable = `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;font-size:13px;border:1px solid #cbd5e1;"><tbody>`;
+    for (const r of numRows) {
+      htmlTable += `<tr>`;
+      for (const n of r) {
+        htmlTable += `<td style="padding:6px 12px;border:1px solid #cbd5e1;text-align:right;">${n}</td>`;
+      }
+      htmlTable += `</tr>`;
+    }
+    htmlTable += `</tbody></table>`;
+
+    await writeDualClipboard(tsvContent, htmlTable);
     setCopiedType("numbers-only");
     setTimeout(() => setCopiedType(null), 2000);
   };
@@ -668,19 +773,28 @@ export default function Home() {
                 id="copy-author-link-values-btn"
                 className="btn-primary"
                 onClick={() => copyAuthorLinkNumbers(false)}
-                title="Copy Author, Link, then the numbers (Values only) to directly paste into Google Sheets"
+                title="Copy formatted table (HTML + TSV) for Google Sheets, Excel, Notion, Docs"
                 style={{ fontWeight: 600 }}
               >
-                {copiedType === "values" ? "✅ Copied (Author, Link, Numbers)!" : "📋 Copy (Author, Link, Numbers)"}
+                {copiedType === "values" ? "✅ Copied Table!" : "📋 Copy Table"}
               </button>
 
               <button
                 id="copy-author-link-headers-btn"
                 className="btn-secondary"
                 onClick={() => copyAuthorLinkNumbers(true)}
-                title="Copy Author, Link, Numbers with header row"
+                title="Copy table with header row"
               >
                 {copiedType === "headers" ? "✅ Copied (+Headers)!" : "📋 Copy (+Headers)"}
+              </button>
+
+              <button
+                id="copy-markdown-btn"
+                className="btn-secondary"
+                onClick={copyMarkdownTable}
+                title="Copy as GitHub / Markdown table format"
+              >
+                {copiedType === "markdown" ? "✅ Copied Markdown!" : "📋 Markdown Table"}
               </button>
 
               <button
