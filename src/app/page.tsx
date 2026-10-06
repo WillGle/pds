@@ -821,9 +821,9 @@ export default function Home() {
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th style={{ width: "36px", textAlign: "center" }}>#</th>
+                    <th style={{ width: "38px", textAlign: "center" }}>#</th>
                     <th style={{ width: "160px" }}>Author</th>
-                    <th style={{ minWidth: "260px", maxWidth: "340px" }}>Link</th>
+                    <th style={{ width: "310px" }}>Link</th>
                     <th className="th-num" style={{ width: "95px" }}>Views</th>
                     <th className="th-num" style={{ width: "85px" }}>Likes</th>
                     <th className="th-num" style={{ width: "85px" }}>Comments</th>
@@ -836,7 +836,7 @@ export default function Home() {
                     <tr key={item.url + idx}>
                       <td className="td-index">{idx + 1}</td>
                       <td className="table-author">{item.author || "—"}</td>
-                      <td style={{ maxWidth: "340px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <td className="table-link" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         <a
                           href={item.url}
                           target="_blank"
@@ -872,9 +872,9 @@ export default function Home() {
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th style={{ width: "36px", textAlign: "center" }}>#</th>
+                    <th style={{ width: "38px", textAlign: "center" }}>#</th>
                     <th style={{ width: "160px" }}>Author</th>
-                    <th style={{ minWidth: "260px", maxWidth: "340px" }}>Link</th>
+                    <th style={{ width: "310px" }}>Link</th>
                     <th className="th-num" style={{ width: "95px" }}>Views</th>
                     <th className="th-num" style={{ width: "85px" }}>Likes</th>
                     <th className="th-num" style={{ width: "85px" }}>Comments</th>
@@ -888,7 +888,7 @@ export default function Home() {
                     <tr key={item.url + idx}>
                       <td className="td-index">{idx + 1}</td>
                       <td className="table-author">{item.author || "—"}</td>
-                      <td style={{ maxWidth: "340px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <td className="table-link" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         <a
                           href={item.url}
                           target="_blank"

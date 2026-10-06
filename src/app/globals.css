@@ -358,6 +358,7 @@ body {
 /* High-Readability Fitted Data Table */
 .custom-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   text-align: left;
   font-size: 0.85rem;
@@ -378,6 +379,8 @@ body {
 
 .custom-table th:last-child {
   border-right: none;
+  background: transparent !important;
+  padding: 0 !important;
 }
 
 .custom-table td {
@@ -390,6 +393,8 @@ body {
 
 .custom-table td:last-child {
   border-right: none;
+  background: transparent !important;
+  padding: 0 !important;
 }
 
 /* Zebra Striping */
