@@ -1,14 +1,34 @@
-__pycache__/
-.vscode/
-_keys.py
-_debug_reel.py
-*.csv
-*.html
-logs/
-*.md
-.venv/
-node_modules/
-.next/
-out/
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# next.js
+/.next/
+/out/
+/build
+
+# environment
 .env*.local
-node_modules
+.env
+
+# vercel
+.vercel
+
+# logs & debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+logs/
+
+# exports / temp data
+*.csv
+*.xlsx
+*.html
+
+# IDE & OS
+.DS_Store
+.vscode/
+Thumbs.db
