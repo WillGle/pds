@@ -1,36 +1,26 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 
 interface FacebookItem {
   url: string;
-  id: string | null;
   views: number | null;
   likes: number | null;
   comments: number | null;
   shares: number | null;
   author: string;
-  title: string;
-  postDate: string;
-  thumbnail: string;
   error?: string;
 }
 
 interface TikTokItem {
   url: string;
-  cleanUrl: string;
-  id: string | null;
   views: number | null;
   likes: number | null;
   comments: number | null;
   shares: number | null;
   saves: number | null;
-  totalInteractions: number | null;
   author: string;
-  title: string;
-  postDate: string;
-  thumbnail: string;
   error?: string;
 }
 
@@ -51,10 +41,29 @@ const SAMPLE_FB_URLS = [
 ].join("\n");
 
 const SAMPLE_TT_URLS = [
-  "https://www.tiktok.com/@nawngs.vlog/video/7573658249547861268",
-  "https://www.tiktok.com/@giadinhcamtaoo/video/7568842259982978322",
-  "https://www.tiktok.com/@duyluandethuong/video/7578311186408656136",
+  "https://www.tiktok.com/@anhchongcongnghe/video/7690930227022761223",
+  "https://www.tiktok.com/@anhchongcongnghe/video/7692367995011747090",
+  "https://www.tiktok.com/@bep_nho_mymy/video/7691999188082494772",
+  "https://www.tiktok.com/@chutunghamvui66988/video/7690560348079901960",
+  "https://www.tiktok.com/@chuyennhalinhbi/video/7690544641992592641",
+  "https://www.tiktok.com/@duyen_chill/video/7692416790378384660",
+  "https://www.tiktok.com/@hienthaydoi68/video/7691297165037063425",
+  "https://www.tiktok.com/@hnhu2000/video/7691226356893453569",
+  "https://www.tiktok.com/@hoangnga_home/video/7691183589144202503",
+  "https://www.tiktok.com/@hoangnga_home/video/7693138486311800072",
+  "https://www.tiktok.com/@ngocvy190893/video/7692046416558034194",
+  "https://www.tiktok.com/@phamnhuquynh0225/video/7691168794345065735",
+  "https://www.tiktok.com/@taydayroi/video/7691682458538118420",
+  "https://www.tiktok.com/@thanhtatdaily/video/7693155206737054984",
+  "https://www.tiktok.com/@tibeoheothi/video/7692308595119115526",
+  "https://www.tiktok.com/@wydanhdu/video/7692438786533297426",
+  "https://www.tiktok.com/@yenthichanvat/video/7692031939166915858",
 ].join("\n");
+
+function formatShortLink(url: string): string {
+  if (!url) return "";
+  return url.replace(/^https?:\/\/(?:www\.)?/, "").split("?")[0].replace(/\/$/, "");
+}
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<"facebook" | "tiktok">("facebook");
@@ -70,10 +79,11 @@ export default function Home() {
   const [ttResults, setTtResults] = useState<TikTokItem[]>([]);
   const [ttLoading, setTtLoading] = useState(false);
   const [ttElapsed, setTtElapsed] = useState<number | null>(null);
+  const [ttProgress, setTtProgress] = useState<{ current: number; total: number } | null>(null);
+  const abortTtRef = useRef<boolean>(false);
 
-  // Search filter & view preferences
+  // Search filter
   const [searchQuery, setSearchQuery] = useState("");
-  const [showOptionalCols, setShowOptionalCols] = useState(false);
   const [copiedType, setCopiedType] = useState<string | null>(null);
 
   // Live timer during scraping
@@ -92,10 +102,14 @@ export default function Home() {
 
   // Handle Facebook scrape
   const handleScrapeFacebook = async () => {
-    const urls = fbInput
-      .split("\n")
-      .map((u) => u.trim())
-      .filter(Boolean);
+    const urls = Array.from(
+      new Set(
+        fbInput
+          .split("\n")
+          .map((u) => u.trim())
+          .filter(Boolean)
+      )
+    );
     if (urls.length === 0) return;
 
     setFbLoading(true);
@@ -110,8 +124,18 @@ export default function Home() {
         body: JSON.stringify({ urls }),
       });
       const data = await resp.json();
-      if (data.data) {
-        setFbResults(data.data);
+      if (Array.isArray(data.data)) {
+        setFbResults(
+          data.data.map((item: any) => ({
+            url: item.url,
+            views: item.views,
+            likes: item.likes,
+            comments: item.comments,
+            shares: item.shares,
+            author: item.author || "—",
+            error: item.error,
+          }))
+        );
       }
     } catch (err) {
       console.error("Facebook scraping failed", err);
@@ -121,186 +145,145 @@ export default function Home() {
     }
   };
 
-  // Handle TikTok scrape
+  // Handle TikTok scrape (progressive execution to respect 1 req/sec limit & prevent timeouts)
   const handleScrapeTikTok = async () => {
-    const urls = ttInput
-      .split("\n")
-      .map((u) => u.trim())
-      .filter(Boolean);
+    const urls = Array.from(
+      new Set(
+        ttInput
+          .split("\n")
+          .map((u) => u.trim())
+          .filter(Boolean)
+      )
+    );
     if (urls.length === 0) return;
 
+    abortTtRef.current = false;
     setTtLoading(true);
     setTtResults([]);
     setTtElapsed(null);
+    setTtProgress({ current: 0, total: urls.length });
     const start = performance.now();
 
     try {
-      const resp = await fetch("/api/scrape/tiktok", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls }),
-      });
-      const data = await resp.json();
-      if (data.data) {
-        setTtResults(data.data);
+      for (let i = 0; i < urls.length; i++) {
+        if (abortTtRef.current) break;
+        const currentUrl = urls[i];
+        setTtProgress({ current: i + 1, total: urls.length });
+
+        try {
+          const resp = await fetch("/api/scrape/tiktok", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: currentUrl }),
+          });
+          const resJson = await resp.json();
+          if (resJson.data) {
+            const d = resJson.data;
+            setTtResults((prev) => [
+              ...prev,
+              {
+                url: d.url || currentUrl,
+                views: d.views,
+                likes: d.likes,
+                comments: d.comments,
+                shares: d.shares,
+                saves: d.saves,
+                author: d.author || "—",
+                error: d.error,
+              },
+            ]);
+          } else {
+            setTtResults((prev) => [
+              ...prev,
+              {
+                url: currentUrl,
+                views: null,
+                likes: null,
+                comments: null,
+                shares: null,
+                saves: null,
+                author: "—",
+                error: resJson.error || "Extraction failed",
+              },
+            ]);
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : "Request failed";
+          setTtResults((prev) => [
+            ...prev,
+            {
+              url: currentUrl,
+              views: null,
+              likes: null,
+              comments: null,
+              shares: null,
+              saves: null,
+              author: "—",
+              error: msg,
+            },
+          ]);
+        }
+
+        if (i < urls.length - 1 && !abortTtRef.current) {
+          await new Promise((resolve) => setTimeout(resolve, 1150));
+        }
       }
-    } catch (err) {
-      console.error("TikTok scraping failed", err);
     } finally {
       setTtLoading(false);
+      setTtProgress(null);
       setTtElapsed(+((performance.now() - start) / 1000).toFixed(2));
     }
   };
 
-  // Filtered Facebook results
+  // Immediate Garbage Collection Friendly Clear Handler
+  const handleClear = () => {
+    if (activeTab === "facebook") {
+      setFbInput("");
+      setFbResults([]);
+      setFbElapsed(null);
+    } else {
+      setTtInput("");
+      setTtResults([]);
+      setTtElapsed(null);
+      setTtProgress(null);
+    }
+    setSearchQuery("");
+  };
+
+  // Filtered results
   const filteredFb = useMemo(() => {
     if (!searchQuery.trim()) return fbResults;
     const q = searchQuery.toLowerCase();
     return fbResults.filter(
-      (item) =>
-        item.author.toLowerCase().includes(q) ||
-        item.title.toLowerCase().includes(q) ||
-        item.url.toLowerCase().includes(q)
+      (item) => item.author.toLowerCase().includes(q) || item.url.toLowerCase().includes(q)
     );
   }, [fbResults, searchQuery]);
 
-  // Filtered TikTok results
   const filteredTt = useMemo(() => {
     if (!searchQuery.trim()) return ttResults;
     const q = searchQuery.toLowerCase();
     return ttResults.filter(
-      (item) =>
-        item.author.toLowerCase().includes(q) ||
-        item.title.toLowerCase().includes(q) ||
-        item.url.toLowerCase().includes(q)
+      (item) => item.author.toLowerCase().includes(q) || item.url.toLowerCase().includes(q)
     );
   }, [ttResults, searchQuery]);
 
-
-
-
-
-  // Stats computation
+  // Aggregate stats
   const fbStats = useMemo(() => {
     const total = fbResults.length;
-    const valid = fbResults.filter((r) => !r.error);
-    const totalViews = valid.reduce((sum, r) => sum + (r.views || 0), 0);
-    const totalLikes = valid.reduce((sum, r) => sum + (r.likes || 0), 0);
-    return { total, validCount: valid.length, totalViews, totalLikes };
+    const totalViews = fbResults.reduce((sum, r) => sum + (r.views || 0), 0);
+    const totalLikes = fbResults.reduce((sum, r) => sum + (r.likes || 0), 0);
+    return { total, totalViews, totalLikes };
   }, [fbResults]);
 
   const ttStats = useMemo(() => {
     const total = ttResults.length;
-    const valid = ttResults.filter((r) => !r.error);
-    const totalViews = valid.reduce((sum, r) => sum + (r.views || 0), 0);
-    const totalLikes = valid.reduce((sum, r) => sum + (r.likes || 0), 0);
-    return { total, validCount: valid.length, totalViews, totalLikes };
+    const totalViews = ttResults.reduce((sum, r) => sum + (r.views || 0), 0);
+    const totalLikes = ttResults.reduce((sum, r) => sum + (r.likes || 0), 0);
+    return { total, totalViews, totalLikes };
   }, [ttResults]);
 
-  // Export to Excel
-  const exportToExcel = () => {
-    const isFb = activeTab === "facebook";
-    const dataToExport = isFb
-      ? fbResults.map((r) => ({
-          URL: r.url,
-          "Video ID": r.id || "",
-          Author: r.author || "",
-          Title: r.title || "",
-          Views: r.views || 0,
-          Likes: r.likes || 0,
-          Comments: r.comments ?? "N/A",
-          Shares: r.shares ?? "N/A",
-          "Post Date": r.postDate || "N/A",
-          Status: r.error ? `Error: ${r.error}` : "OK",
-        }))
-      : ttResults.map((r) => ({
-          URL: r.url,
-          "Clean URL": r.cleanUrl || "",
-          "Video ID": r.id || "",
-          Author: r.author || "",
-          Title: r.title || "",
-          Views: r.views || 0,
-          Likes: r.likes || 0,
-          Comments: r.comments || 0,
-          Shares: r.shares || 0,
-          Saves: r.saves || 0,
-          "Total Interactions": r.totalInteractions || 0,
-          "Release Date": r.postDate || "N/A",
-          Status: r.error ? `Error: ${r.error}` : "OK",
-        }));
-
-    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, isFb ? "Facebook Data" : "TikTok Data");
-
-    const timeStr = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    XLSX.writeFile(workbook, `${isFb ? "facebook" : "tiktok"}_data_${timeStr}.xlsx`);
-  };
-
-  // Export to CSV
-  const exportToCsv = () => {
-    const isFb = activeTab === "facebook";
-    const dataToExport = isFb
-      ? fbResults.map((r) => ({
-          URL: r.url,
-          Author: r.author || "",
-          Title: (r.title || "").replace(/[\r\n]+/g, " "),
-          Views: r.views || 0,
-          Likes: r.likes || 0,
-          Comments: r.comments ?? 0,
-          Shares: r.shares ?? 0,
-          Date: r.postDate || "N/A",
-        }))
-      : ttResults.map((r) => ({
-          URL: r.url,
-          Author: r.author || "",
-          Title: (r.title || "").replace(/[\r\n]+/g, " "),
-          Views: r.views || 0,
-          Likes: r.likes || 0,
-          Comments: r.comments || 0,
-          Shares: r.shares || 0,
-          Saves: r.saves || 0,
-          Date: r.postDate || "N/A",
-        }));
-
-    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
-    const csvOutput = XLSX.utils.sheet_to_csv(worksheet);
-    const blob = new Blob(["\uFEFF" + csvOutput], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    const timeStr = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    link.setAttribute("download", `${isFb ? "facebook" : "tiktok"}_data_${timeStr}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
-  // Copy ONLY the 4 key metrics: Views, Likes, Comments, Shares
-  const copyMetricsOnly = (withHeaders: boolean) => {
-    const isFb = activeTab === "facebook";
-    const data = isFb ? filteredFb : filteredTt;
-    if (data.length === 0) return;
-
-    const rows = data.map((item) => [
-      item.views !== null ? String(item.views) : "0",
-      item.likes !== null ? String(item.likes) : "0",
-      item.comments !== null ? String(item.comments) : "0",
-      item.shares !== null ? String(item.shares) : "0",
-    ]);
-
-    const header = "Views\tLikes\tComments\tShares";
-    const tsvContent = withHeaders
-      ? [header, ...rows.map((r) => r.join("\t"))].join("\n")
-      : rows.map((r) => r.join("\t")).join("\n");
-
-    navigator.clipboard.writeText(tsvContent);
-    setCopiedType(withHeaders ? "metrics-header" : "metrics-values");
-    setTimeout(() => setCopiedType(null), 2000);
-  };
-
-  // Copy full table with all fields as TSV
-  const copyFullTable = () => {
+  // Copy Author, Link, then the Numbers (TSV format for direct paste into Google Sheets)
+  const copyAuthorLinkNumbers = (withHeaders: boolean) => {
     const isFb = activeTab === "facebook";
     const data = isFb ? filteredFb : filteredTt;
     if (data.length === 0) return;
@@ -309,43 +292,125 @@ export default function Home() {
     let rows: string[][];
 
     if (isFb) {
-      headers = ["#", "Views", "Likes", "Comments", "Shares", "Author", "Caption / Title", "Post Date", "URL"];
-      rows = filteredFb.map((item, idx) => [
-        String(idx + 1),
+      headers = ["Author", "Link", "Views", "Likes", "Comments", "Shares"];
+      rows = filteredFb.map((item) => [
+        item.author || "",
+        item.url || "",
         item.views !== null ? String(item.views) : "0",
         item.likes !== null ? String(item.likes) : "0",
         item.comments !== null ? String(item.comments) : "0",
         item.shares !== null ? String(item.shares) : "0",
-        item.author || "",
-        (item.title || "").replace(/[\t\r\n]+/g, " ").trim(),
-        item.postDate || "",
-        item.url || "",
       ]);
     } else {
-      headers = ["#", "Views", "Likes", "Comments", "Shares", "Saves", "Total Interactions", "Author", "Title", "Release Date", "URL"];
-      rows = filteredTt.map((item, idx) => [
-        String(idx + 1),
+      headers = ["Author", "Link", "Views", "Likes", "Comments", "Shares", "Saves"];
+      rows = filteredTt.map((item) => [
+        item.author || "",
+        item.url || "",
         item.views !== null ? String(item.views) : "0",
         item.likes !== null ? String(item.likes) : "0",
         item.comments !== null ? String(item.comments) : "0",
         item.shares !== null ? String(item.shares) : "0",
         item.saves !== null ? String(item.saves) : "0",
-        item.totalInteractions !== null ? String(item.totalInteractions) : "0",
-        item.author || "",
-        (item.title || "").replace(/[\t\r\n]+/g, " ").trim(),
-        item.postDate || "",
-        item.url || "",
       ]);
     }
 
-    const tsvContent = [
-      headers.join("\t"),
-      ...rows.map((row) => row.join("\t")),
-    ].join("\n");
+    const tsvContent = withHeaders
+      ? [headers.join("\t"), ...rows.map((r) => r.join("\t"))].join("\n")
+      : rows.map((r) => r.join("\t")).join("\n");
 
     navigator.clipboard.writeText(tsvContent);
-    setCopiedType("full");
+    setCopiedType(withHeaders ? "headers" : "values");
     setTimeout(() => setCopiedType(null), 2000);
+  };
+
+  // Copy ONLY the numbers: Views, Likes, Comments, Shares, Saves
+  const copyNumbersOnly = () => {
+    const isFb = activeTab === "facebook";
+    const data = isFb ? filteredFb : filteredTt;
+    if (data.length === 0) return;
+
+    const rows = isFb
+      ? filteredFb.map((item) => [
+          item.views !== null ? String(item.views) : "0",
+          item.likes !== null ? String(item.likes) : "0",
+          item.comments !== null ? String(item.comments) : "0",
+          item.shares !== null ? String(item.shares) : "0",
+        ])
+      : filteredTt.map((item) => [
+          item.views !== null ? String(item.views) : "0",
+          item.likes !== null ? String(item.likes) : "0",
+          item.comments !== null ? String(item.comments) : "0",
+          item.shares !== null ? String(item.shares) : "0",
+          item.saves !== null ? String(item.saves) : "0",
+        ]);
+
+    const tsvContent = rows.map((r) => r.join("\t")).join("\n");
+    navigator.clipboard.writeText(tsvContent);
+    setCopiedType("numbers-only");
+    setTimeout(() => setCopiedType(null), 2000);
+  };
+
+  // Export to Excel
+  const exportToExcel = () => {
+    const isFb = activeTab === "facebook";
+    const dataToExport = isFb
+      ? fbResults.map((r) => ({
+          Author: r.author || "",
+          Link: r.url,
+          Views: r.views ?? 0,
+          Likes: r.likes ?? 0,
+          Comments: r.comments ?? 0,
+          Shares: r.shares ?? 0,
+        }))
+      : ttResults.map((r) => ({
+          Author: r.author || "",
+          Link: r.url,
+          Views: r.views ?? 0,
+          Likes: r.likes ?? 0,
+          Comments: r.comments ?? 0,
+          Shares: r.shares ?? 0,
+          Saves: r.saves ?? 0,
+        }));
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, isFb ? "Facebook" : "TikTok");
+    XLSX.writeFile(workbook, `${isFb ? "facebook" : "tiktok"}_data.xlsx`);
+  };
+
+  // Export to CSV
+  const exportToCsv = () => {
+    const isFb = activeTab === "facebook";
+    const dataToExport = isFb
+      ? fbResults.map((r) => ({
+          Author: r.author || "",
+          Link: r.url,
+          Views: r.views ?? 0,
+          Likes: r.likes ?? 0,
+          Comments: r.comments ?? 0,
+          Shares: r.shares ?? 0,
+        }))
+      : ttResults.map((r) => ({
+          Author: r.author || "",
+          Link: r.url,
+          Views: r.views ?? 0,
+          Likes: r.likes ?? 0,
+          Comments: r.comments ?? 0,
+          Shares: r.shares ?? 0,
+          Saves: r.saves ?? 0,
+        }));
+
+    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+    const csvOutput = XLSX.utils.sheet_to_csv(worksheet);
+    const blob = new Blob(["\uFEFF" + csvOutput], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", `${isFb ? "facebook" : "tiktok"}_data.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -357,18 +422,13 @@ export default function Home() {
           <div>
             <h1 className="brand-title">Social Pulse Analytics</h1>
             <p className="brand-subtitle">
-              High-speed serverless scraper for Facebook Reels &amp; TikTok videos on Vercel
+              High-speed serverless scraper for Facebook Reels &amp; TikTok videos
             </p>
           </div>
         </div>
-
-        <div className="env-pill">
-          <span className="env-dot"></span>
-          <span>Vercel Serverless Ready (0s setup)</span>
-        </div>
       </header>
 
-      {/* Tabs navigation */}
+      {/* Tabs */}
       <nav className="tabs-nav" aria-label="Social platform tabs">
         <button
           id="tab-fb-btn"
@@ -392,20 +452,20 @@ export default function Home() {
         </button>
       </nav>
 
-      {/* Input Form Card */}
+      {/* Input Section */}
       <section className="glass-card" aria-labelledby="input-section-title">
         <h2 id="input-section-title" className="card-title">
           {activeTab === "facebook" ? "📘 Input Facebook Video / Reel URLs" : "🎵 Input TikTok Video URLs"}
         </h2>
         <p className="card-subtitle">
-          Paste links below (one per line). Processed in parallel via Vercel lightweight HTTP extractors without heavy Selenium browser overhead.
+          Paste links below (one per line). Extract Author, Link, and Numbers ready for Google Sheets.
         </p>
 
         {activeTab === "facebook" ? (
           <textarea
             id="fb-url-input"
             className="input-textarea"
-            placeholder="https://www.facebook.com/reel/1075481022014849&#10;https://www.facebook.com/reel/1085809004361213"
+            placeholder="https://www.facebook.com/reel/1075481022014849"
             value={fbInput}
             onChange={(e) => setFbInput(e.target.value)}
           />
@@ -445,11 +505,24 @@ export default function Home() {
               >
                 {ttLoading ? (
                   <>
-                    <span className="spinner"></span> Scraping ({timer}s)...
+                    <span className="spinner"></span> Scraping {ttProgress ? `(${ttProgress.current}/${ttProgress.total})` : ""} ({timer}s)...
                   </>
                 ) : (
                   <>🚀 Start TikTok Scraping</>
                 )}
+              </button>
+            )}
+
+            {activeTab === "tiktok" && ttLoading && (
+              <button
+                id="tt-stop-btn"
+                className="btn-secondary"
+                style={{ borderColor: "#ef4444", color: "#f87171" }}
+                onClick={() => {
+                  abortTtRef.current = true;
+                }}
+              >
+                ⏹ Stop
               </button>
             )}
 
@@ -467,10 +540,7 @@ export default function Home() {
             <button
               id="clear-input-btn"
               className="btn-secondary"
-              onClick={() => {
-                if (activeTab === "facebook") setFbInput("");
-                else setTtInput("");
-              }}
+              onClick={handleClear}
             >
               🗑️ Clear
             </button>
@@ -484,11 +554,34 @@ export default function Home() {
             URLs
           </div>
         </div>
+
+        {/* Live TikTok progress bar */}
+        {activeTab === "tiktok" && ttLoading && ttProgress && (
+          <div style={{ marginTop: "1rem" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "0.35rem", fontSize: "0.82rem", color: "var(--text-muted)" }}>
+              <span>Scraping TikTok data (rate-limit compliant)...</span>
+              <span>
+                <strong style={{ color: "var(--text-main)" }}>{ttProgress.current}</strong> / {ttProgress.total} (
+                {Math.round((ttProgress.current / ttProgress.total) * 100)}%)
+              </span>
+            </div>
+            <div style={{ width: "100%", height: "5px", backgroundColor: "#1e293b", borderRadius: "999px", overflow: "hidden" }}>
+              <div
+                style={{
+                  width: `${(ttProgress.current / ttProgress.total) * 100}%`,
+                  height: "100%",
+                  backgroundColor: "#06b6d4",
+                  transition: "width 0.25s ease",
+                }}
+              />
+            </div>
+          </div>
+        )}
       </section>
 
-      {/* Real-time KPI Stats Banner */}
-      {((activeTab === "facebook" && fbResults.length > 0) ||
-        (activeTab === "tiktok" && ttResults.length > 0)) && (
+      {/* KPI Stats Banner */}
+      {((activeTab === "facebook" && (fbResults.length > 0 || fbLoading)) ||
+        (activeTab === "tiktok" && (ttResults.length > 0 || ttLoading))) && (
         <section className="metrics-grid" aria-label="Performance and Aggregated Metrics">
           <div className="kpi-card">
             <div className="kpi-icon">📋</div>
@@ -504,7 +597,7 @@ export default function Home() {
             <div className="kpi-icon">⏱️</div>
             <div>
               <div className="kpi-val">
-                {(activeTab === "facebook" ? fbElapsed : ttElapsed) || 0}s
+                {(activeTab === "facebook" ? (fbElapsed !== null ? fbElapsed : timer) : (ttElapsed !== null ? ttElapsed : timer))}s
               </div>
               <div className="kpi-label">Total Elapsed Time</div>
             </div>
@@ -515,7 +608,7 @@ export default function Home() {
             <div>
               <div className="kpi-val">
                 {(
-                  ((activeTab === "facebook" ? fbElapsed : ttElapsed) || 0) /
+                  ((activeTab === "facebook" ? (fbElapsed || timer) : (ttElapsed || timer)) || 0) /
                   (activeTab === "facebook" ? fbStats.total || 1 : ttStats.total || 1)
                 ).toFixed(2)}
                 s
@@ -546,71 +639,57 @@ export default function Home() {
         </section>
       )}
 
-
-
-
-
-      {/* Main Results Data Table */}
+      {/* Scraped Results Section */}
       {((activeTab === "facebook" && fbResults.length > 0) ||
         (activeTab === "tiktok" && ttResults.length > 0)) && (
-        <section className="glass-card table-card" aria-label="Scraped Data Table">
-          <div className="table-header-bar">
+        <section className="glass-card" aria-labelledby="results-title">
+          <div className="results-header">
             <div>
-              <h3 style={{ fontSize: "1.1rem", fontWeight: 700 }}>
-                {activeTab === "facebook" ? "📋 Scraped Facebook Data" : "📋 Scraped TikTok Data"}
-              </h3>
-              <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-                Showing{" "}
-                {activeTab === "facebook" ? filteredFb.length : filteredTt.length} of{" "}
-                {activeTab === "facebook" ? fbResults.length : ttResults.length} items
+              <h2 id="results-title" className="card-title">
+                📊 Scraped {activeTab === "facebook" ? "Facebook" : "TikTok"} Data
+              </h2>
+              <p className="card-subtitle">
+                Showing {(activeTab === "facebook" ? filteredFb : filteredTt).length} of{" "}
+                {(activeTab === "facebook" ? fbResults : ttResults).length} items
               </p>
             </div>
 
-            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+            <div className="results-actions">
               <input
-                id="table-search-input"
+                id="search-input"
                 type="text"
                 placeholder="🔍 Search..."
+                className="search-box"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                style={{
-                  background: "var(--bg-input)",
-                  border: "1px solid var(--border-main)",
-                  borderRadius: "var(--radius-sm)",
-                  padding: "0.5rem 0.8rem",
-                  color: "var(--text-main)",
-                  fontSize: "0.85rem",
-                  outline: "none",
-                  width: "180px",
-                }}
               />
 
               <button
-                id="copy-metrics-values-btn"
+                id="copy-author-link-values-btn"
                 className="btn-primary"
-                onClick={() => copyMetricsOnly(false)}
-                title="Copy ONLY numeric values of Views, Likes, Comments, Shares to directly paste into Google Sheets / Excel"
+                onClick={() => copyAuthorLinkNumbers(false)}
+                title="Copy Author, Link, then the numbers (Values only) to directly paste into Google Sheets"
                 style={{ fontWeight: 600 }}
               >
-                {copiedType === "metrics-values" ? "✅ Copied 4 Metrics!" : "📋 Copy 4 Metrics (Values)"}
+                {copiedType === "values" ? "✅ Copied (Author, Link, Numbers)!" : "📋 Copy (Author, Link, Numbers)"}
               </button>
 
               <button
-                id="copy-metrics-header-btn"
+                id="copy-author-link-headers-btn"
                 className="btn-secondary"
-                onClick={() => copyMetricsOnly(true)}
-                title="Copy Views, Likes, Comments, Shares with header row"
+                onClick={() => copyAuthorLinkNumbers(true)}
+                title="Copy Author, Link, Numbers with header row"
               >
-                {copiedType === "metrics-header" ? "✅ Copied (+Headers)!" : "📋 Copy (+Headers)"}
+                {copiedType === "headers" ? "✅ Copied (+Headers)!" : "📋 Copy (+Headers)"}
               </button>
 
               <button
-                id="copy-all-btn"
+                id="copy-numbers-only-btn"
                 className="btn-secondary"
-                onClick={copyFullTable}
-                title="Copy all columns as TSV"
+                onClick={copyNumbersOnly}
+                title="Copy ONLY numbers"
               >
-                {copiedType === "full" ? "✅ Copied All Data!" : "📋 Copy All Data"}
+                {copiedType === "numbers-only" ? "✅ Copied Numbers!" : "📋 Numbers Only"}
               </button>
 
               <button id="export-excel-btn" className="btn-secondary" onClick={exportToExcel}>
@@ -620,30 +699,6 @@ export default function Home() {
               <button id="export-csv-btn" className="btn-secondary" onClick={exportToCsv}>
                 📄 CSV
               </button>
-
-              <label
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.45rem",
-                  fontSize: "0.82rem",
-                  color: "var(--text-muted)",
-                  cursor: "pointer",
-                  userSelect: "none",
-                  background: "var(--btn-secondary-bg)",
-                  padding: "0.45rem 0.75rem",
-                  borderRadius: "var(--radius-sm)",
-                  border: "1px solid var(--border-main)",
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={showOptionalCols}
-                  onChange={(e) => setShowOptionalCols(e.target.checked)}
-                  style={{ cursor: "pointer" }}
-                />
-                Show extra details (Caption, Media, Date)
-              </label>
             </div>
           </div>
 
@@ -652,23 +707,31 @@ export default function Home() {
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th style={{ width: "45px", textAlign: "center" }}>#</th>
-                    <th className="th-num">Views</th>
-                    <th className="th-num">Likes</th>
-                    <th className="th-num">Comments</th>
-                    <th className="th-num">Shares</th>
+                    <th style={{ width: "36px", textAlign: "center" }}>#</th>
                     <th style={{ width: "160px" }}>Author</th>
-                    {showOptionalCols && <th>Caption / Title</th>}
-                    {showOptionalCols && <th style={{ width: "56px" }}>Media</th>}
-                    {showOptionalCols && <th style={{ width: "105px" }}>Post Date</th>}
-                    <th style={{ width: "75px", textAlign: "center" }}>Link</th>
+                    <th style={{ minWidth: "260px", maxWidth: "340px" }}>Link</th>
+                    <th className="th-num" style={{ width: "95px" }}>Views</th>
+                    <th className="th-num" style={{ width: "85px" }}>Likes</th>
+                    <th className="th-num" style={{ width: "85px" }}>Comments</th>
+                    <th className="th-num" style={{ width: "85px" }}>Shares</th>
+                    <th style={{ width: "auto" }}></th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredFb.map((item, idx) => (
                     <tr key={item.url + idx}>
-                      <td className="td-index">
-                        {idx + 1}
+                      <td className="td-index">{idx + 1}</td>
+                      <td className="table-author">{item.author || "—"}</td>
+                      <td style={{ maxWidth: "340px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="short-link"
+                          title={item.url}
+                        >
+                          {formatShortLink(item.url)}
+                        </a>
                       </td>
                       <td className="td-num">
                         {item.views !== null ? (
@@ -686,42 +749,7 @@ export default function Home() {
                       <td className="td-num">
                         {item.shares !== null ? item.shares.toLocaleString() : <span className="text-dim">—</span>}
                       </td>
-                      <td className="table-author">
-                        {item.author || "—"}
-                      </td>
-                      {showOptionalCols && (
-                        <td className="table-caption">
-                          {item.title ? (
-                            <span title={item.title}>
-                              {item.title.length > 90 ? item.title.substring(0, 90) + "..." : item.title}
-                            </span>
-                          ) : (
-                            <span className="text-dim">No description</span>
-                          )}
-                        </td>
-                      )}
-                      {showOptionalCols && (
-                        <td>
-                          {item.thumbnail ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img src={item.thumbnail} alt="thumbnail" className="video-thumb-mini" />
-                          ) : (
-                            <div className="video-thumb-mini thumb-fallback">
-                              N/A
-                            </div>
-                          )}
-                        </td>
-                      )}
-                      {showOptionalCols && (
-                        <td className="td-date">
-                          {item.postDate || "N/A"}
-                        </td>
-                      )}
-                      <td style={{ textAlign: "center" }}>
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="link-btn">
-                          Open ↗
-                        </a>
-                      </td>
+                      <td></td>
                     </tr>
                   ))}
                 </tbody>
@@ -730,25 +758,32 @@ export default function Home() {
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th style={{ width: "45px", textAlign: "center" }}>#</th>
-                    <th className="th-num">Views</th>
-                    <th className="th-num">Likes</th>
-                    <th className="th-num">Comments</th>
-                    <th className="th-num">Shares</th>
-                    <th className="th-num">Saves</th>
-                    <th className="th-num">Total Int.</th>
+                    <th style={{ width: "36px", textAlign: "center" }}>#</th>
                     <th style={{ width: "160px" }}>Author</th>
-                    {showOptionalCols && <th>Title</th>}
-                    {showOptionalCols && <th style={{ width: "56px" }}>Media</th>}
-                    {showOptionalCols && <th style={{ width: "105px" }}>Release Date</th>}
-                    <th style={{ width: "75px", textAlign: "center" }}>Link</th>
+                    <th style={{ minWidth: "260px", maxWidth: "340px" }}>Link</th>
+                    <th className="th-num" style={{ width: "95px" }}>Views</th>
+                    <th className="th-num" style={{ width: "85px" }}>Likes</th>
+                    <th className="th-num" style={{ width: "85px" }}>Comments</th>
+                    <th className="th-num" style={{ width: "85px" }}>Shares</th>
+                    <th className="th-num" style={{ width: "85px" }}>Saves</th>
+                    <th style={{ width: "auto" }}></th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredTt.map((item, idx) => (
                     <tr key={item.url + idx}>
-                      <td className="td-index">
-                        {idx + 1}
+                      <td className="td-index">{idx + 1}</td>
+                      <td className="table-author">{item.author || "—"}</td>
+                      <td style={{ maxWidth: "340px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="short-link"
+                          title={item.url}
+                        >
+                          {formatShortLink(item.url)}
+                        </a>
                       </td>
                       <td className="td-num">
                         {item.views !== null ? (
@@ -769,47 +804,7 @@ export default function Home() {
                       <td className="td-num">
                         {item.saves !== null ? item.saves.toLocaleString() : <span className="text-dim">N/A</span>}
                       </td>
-                      <td className="td-num" style={{ fontWeight: 700 }}>
-                        {item.totalInteractions !== null
-                          ? item.totalInteractions.toLocaleString()
-                          : <span className="text-dim">N/A</span>}
-                      </td>
-                      <td className="table-author">
-                        {item.author || "—"}
-                      </td>
-                      {showOptionalCols && (
-                        <td className="table-caption">
-                          {item.title ? (
-                            <span title={item.title}>
-                              {item.title.length > 85 ? item.title.substring(0, 85) + "..." : item.title}
-                            </span>
-                          ) : (
-                            <span className="text-dim">No title</span>
-                          )}
-                        </td>
-                      )}
-                      {showOptionalCols && (
-                        <td>
-                          {item.thumbnail ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img src={item.thumbnail} alt="thumbnail" className="video-thumb-mini" />
-                          ) : (
-                            <div className="video-thumb-mini thumb-fallback">
-                              N/A
-                            </div>
-                          )}
-                        </td>
-                      )}
-                      {showOptionalCols && (
-                        <td className="td-date">
-                          {item.postDate || "N/A"}
-                        </td>
-                      )}
-                      <td style={{ textAlign: "center" }}>
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="link-btn">
-                          Open ↗
-                        </a>
-                      </td>
+                      <td></td>
                     </tr>
                   ))}
                 </tbody>
