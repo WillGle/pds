@@ -71,9 +71,10 @@ export default function Home() {
   const [ttLoading, setTtLoading] = useState(false);
   const [ttElapsed, setTtElapsed] = useState<number | null>(null);
 
-  // Search filter
+  // Search filter & view preferences
   const [searchQuery, setSearchQuery] = useState("");
-  const [copiedStatus, setCopiedStatus] = useState(false);
+  const [showOptionalCols, setShowOptionalCols] = useState(false);
+  const [copiedType, setCopiedType] = useState<string | null>(null);
 
   // Live timer during scraping
   const [timer, setTimer] = useState(0);
@@ -175,20 +176,9 @@ export default function Home() {
     );
   }, [ttResults, searchQuery]);
 
-  // Top 5 viral items
-  const topViralFb = useMemo(() => {
-    return [...fbResults]
-      .filter((item) => item.views !== null)
-      .sort((a, b) => (b.views || 0) - (a.views || 0))
-      .slice(0, 5);
-  }, [fbResults]);
 
-  const topViralTt = useMemo(() => {
-    return [...ttResults]
-      .filter((item) => item.views !== null)
-      .sort((a, b) => (b.views || 0) - (a.views || 0))
-      .slice(0, 5);
-  }, [ttResults]);
+
+
 
   // Stats computation
   const fbStats = useMemo(() => {
@@ -286,13 +276,76 @@ export default function Home() {
     document.body.removeChild(link);
   };
 
-  // Copy JSON
-  const handleCopyJson = () => {
+  // Copy ONLY the 4 key metrics: Views, Likes, Comments, Shares
+  const copyMetricsOnly = (withHeaders: boolean) => {
     const isFb = activeTab === "facebook";
-    const jsonStr = JSON.stringify(isFb ? fbResults : ttResults, null, 2);
-    navigator.clipboard.writeText(jsonStr);
-    setCopiedStatus(true);
-    setTimeout(() => setCopiedStatus(false), 2000);
+    const data = isFb ? filteredFb : filteredTt;
+    if (data.length === 0) return;
+
+    const rows = data.map((item) => [
+      item.views !== null ? String(item.views) : "0",
+      item.likes !== null ? String(item.likes) : "0",
+      item.comments !== null ? String(item.comments) : "0",
+      item.shares !== null ? String(item.shares) : "0",
+    ]);
+
+    const header = "Views\tLikes\tComments\tShares";
+    const tsvContent = withHeaders
+      ? [header, ...rows.map((r) => r.join("\t"))].join("\n")
+      : rows.map((r) => r.join("\t")).join("\n");
+
+    navigator.clipboard.writeText(tsvContent);
+    setCopiedType(withHeaders ? "metrics-header" : "metrics-values");
+    setTimeout(() => setCopiedType(null), 2000);
+  };
+
+  // Copy full table with all fields as TSV
+  const copyFullTable = () => {
+    const isFb = activeTab === "facebook";
+    const data = isFb ? filteredFb : filteredTt;
+    if (data.length === 0) return;
+
+    let headers: string[];
+    let rows: string[][];
+
+    if (isFb) {
+      headers = ["#", "Views", "Likes", "Comments", "Shares", "Author", "Caption / Title", "Post Date", "URL"];
+      rows = filteredFb.map((item, idx) => [
+        String(idx + 1),
+        item.views !== null ? String(item.views) : "0",
+        item.likes !== null ? String(item.likes) : "0",
+        item.comments !== null ? String(item.comments) : "0",
+        item.shares !== null ? String(item.shares) : "0",
+        item.author || "",
+        (item.title || "").replace(/[\t\r\n]+/g, " ").trim(),
+        item.postDate || "",
+        item.url || "",
+      ]);
+    } else {
+      headers = ["#", "Views", "Likes", "Comments", "Shares", "Saves", "Total Interactions", "Author", "Title", "Release Date", "URL"];
+      rows = filteredTt.map((item, idx) => [
+        String(idx + 1),
+        item.views !== null ? String(item.views) : "0",
+        item.likes !== null ? String(item.likes) : "0",
+        item.comments !== null ? String(item.comments) : "0",
+        item.shares !== null ? String(item.shares) : "0",
+        item.saves !== null ? String(item.saves) : "0",
+        item.totalInteractions !== null ? String(item.totalInteractions) : "0",
+        item.author || "",
+        (item.title || "").replace(/[\t\r\n]+/g, " ").trim(),
+        item.postDate || "",
+        item.url || "",
+      ]);
+    }
+
+    const tsvContent = [
+      headers.join("\t"),
+      ...rows.map((row) => row.join("\t")),
+    ].join("\n");
+
+    navigator.clipboard.writeText(tsvContent);
+    setCopiedType("full");
+    setTimeout(() => setCopiedType(null), 2000);
   };
 
   return (
@@ -493,68 +546,9 @@ export default function Home() {
         </section>
       )}
 
-      {/* Top 5 Viral Showcase */}
-      {activeTab === "facebook" && topViralFb.length > 0 && (
-        <section className="viral-section">
-          <h2 className="card-title">🏆 Top Viral Facebook Reels (Highest Views)</h2>
-          <div className="viral-grid">
-            {topViralFb.map((item, idx) => (
-              <div key={item.url + idx} className="viral-card">
-                <span className="viral-badge">#{idx + 1} Viral</span>
-                {item.thumbnail ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.thumbnail} alt={item.title} className="viral-thumb" />
-                ) : (
-                  <div className="viral-thumb" style={{ display: "grid", placeContent: "center", color: "#64748b" }}>
-                    No Thumbnail
-                  </div>
-                )}
-                <div className="viral-body">
-                  <div className="viral-author">{item.author || "Facebook Creator"}</div>
-                  <div className="viral-title">{item.title || "No description"}</div>
-                  <div className="viral-stats">
-                    <span style={{ color: "#60a5fa", fontWeight: 700 }}>
-                      👁️ {(item.views || 0).toLocaleString()} views
-                    </span>
-                    <span>👍 {(item.likes || 0).toLocaleString()}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
 
-      {activeTab === "tiktok" && topViralTt.length > 0 && (
-        <section className="viral-section">
-          <h2 className="card-title">🏆 Top Viral TikTok Videos (Highest Views)</h2>
-          <div className="viral-grid">
-            {topViralTt.map((item, idx) => (
-              <div key={item.url + idx} className="viral-card">
-                <span className="viral-badge">#{idx + 1} Viral</span>
-                {item.thumbnail ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={item.thumbnail} alt={item.title} className="viral-thumb" />
-                ) : (
-                  <div className="viral-thumb" style={{ display: "grid", placeContent: "center", color: "#64748b" }}>
-                    No Thumbnail
-                  </div>
-                )}
-                <div className="viral-body">
-                  <div className="viral-author">{item.author || "TikTok Creator"}</div>
-                  <div className="viral-title">{item.title || "No title"}</div>
-                  <div className="viral-stats">
-                    <span style={{ color: "#f43f5e", fontWeight: 700 }}>
-                      👁️ {(item.views || 0).toLocaleString()} views
-                    </span>
-                    <span>👍 {(item.likes || 0).toLocaleString()}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
+
+
 
       {/* Main Results Data Table */}
       {((activeTab === "facebook" && fbResults.length > 0) ||
@@ -572,36 +566,84 @@ export default function Home() {
               </p>
             </div>
 
-            <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
               <input
                 id="table-search-input"
                 type="text"
-                placeholder="🔍 Search author, caption, URL..."
+                placeholder="🔍 Search..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 style={{
-                  background: "rgba(11, 16, 26, 0.8)",
-                  border: "1px solid var(--border-subtle)",
+                  background: "var(--bg-input)",
+                  border: "1px solid var(--border-main)",
                   borderRadius: "var(--radius-sm)",
-                  padding: "0.55rem 0.9rem",
+                  padding: "0.5rem 0.8rem",
                   color: "var(--text-main)",
                   fontSize: "0.85rem",
                   outline: "none",
-                  width: "240px",
+                  width: "180px",
                 }}
               />
 
+              <button
+                id="copy-metrics-values-btn"
+                className="btn-primary"
+                onClick={() => copyMetricsOnly(false)}
+                title="Copy ONLY numeric values of Views, Likes, Comments, Shares to directly paste into Google Sheets / Excel"
+                style={{ fontWeight: 600 }}
+              >
+                {copiedType === "metrics-values" ? "✅ Copied 4 Metrics!" : "📋 Copy 4 Metrics (Values)"}
+              </button>
+
+              <button
+                id="copy-metrics-header-btn"
+                className="btn-secondary"
+                onClick={() => copyMetricsOnly(true)}
+                title="Copy Views, Likes, Comments, Shares with header row"
+              >
+                {copiedType === "metrics-header" ? "✅ Copied (+Headers)!" : "📋 Copy (+Headers)"}
+              </button>
+
+              <button
+                id="copy-all-btn"
+                className="btn-secondary"
+                onClick={copyFullTable}
+                title="Copy all columns as TSV"
+              >
+                {copiedType === "full" ? "✅ Copied All Data!" : "📋 Copy All Data"}
+              </button>
+
               <button id="export-excel-btn" className="btn-secondary" onClick={exportToExcel}>
-                📊 Export Excel (.xlsx)
+                📊 Excel
               </button>
 
               <button id="export-csv-btn" className="btn-secondary" onClick={exportToCsv}>
-                📄 Export CSV
+                📄 CSV
               </button>
 
-              <button id="copy-json-btn" className="btn-secondary" onClick={handleCopyJson}>
-                {copiedStatus ? "✅ Copied!" : "📋 Copy JSON"}
-              </button>
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "0.45rem",
+                  fontSize: "0.82rem",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  userSelect: "none",
+                  background: "var(--btn-secondary-bg)",
+                  padding: "0.45rem 0.75rem",
+                  borderRadius: "var(--radius-sm)",
+                  border: "1px solid var(--border-main)",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={showOptionalCols}
+                  onChange={(e) => setShowOptionalCols(e.target.checked)}
+                  style={{ cursor: "pointer" }}
+                />
+                Show extra details (Caption, Media, Date)
+              </label>
             </div>
           </div>
 
@@ -610,66 +652,72 @@ export default function Home() {
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th>#</th>
-                    <th>Media</th>
-                    <th>Author</th>
-                    <th>Caption / Title</th>
-                    <th>Views</th>
-                    <th>Likes</th>
-                    <th>Comments</th>
-                    <th>Shares</th>
-                    <th>Post Date</th>
-                    <th>Link</th>
+                    <th style={{ width: "45px", textAlign: "center" }}>#</th>
+                    <th className="th-num">Views</th>
+                    <th className="th-num">Likes</th>
+                    <th className="th-num">Comments</th>
+                    <th className="th-num">Shares</th>
+                    <th style={{ width: "160px" }}>Author</th>
+                    {showOptionalCols && <th>Caption / Title</th>}
+                    {showOptionalCols && <th style={{ width: "56px" }}>Media</th>}
+                    {showOptionalCols && <th style={{ width: "105px" }}>Post Date</th>}
+                    <th style={{ width: "75px", textAlign: "center" }}>Link</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredFb.map((item, idx) => (
                     <tr key={item.url + idx}>
-                      <td style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                      <td className="td-index">
                         {idx + 1}
                       </td>
-                      <td>
-                        {item.thumbnail ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={item.thumbnail} alt="thumbnail" className="video-thumb-mini" />
+                      <td className="td-num">
+                        {item.views !== null ? (
+                          <span>{item.views.toLocaleString()}</span>
                         ) : (
-                          <div className="video-thumb-mini" style={{ display: "grid", placeContent: "center", fontSize: "0.7rem", color: "#64748b" }}>
-                            N/A
-                          </div>
+                          <span className="text-dim">N/A</span>
                         )}
                       </td>
-                      <td style={{ fontWeight: 600, color: "#60a5fa", whiteSpace: "nowrap" }}>
+                      <td className="td-num">
+                        {item.likes !== null ? item.likes.toLocaleString() : <span className="text-dim">N/A</span>}
+                      </td>
+                      <td className="td-num">
+                        {item.comments !== null ? item.comments.toLocaleString() : <span className="text-dim">—</span>}
+                      </td>
+                      <td className="td-num">
+                        {item.shares !== null ? item.shares.toLocaleString() : <span className="text-dim">—</span>}
+                      </td>
+                      <td className="table-author">
                         {item.author || "—"}
                       </td>
-                      <td style={{ maxWidth: "340px", whiteSpace: "normal" }}>
-                        {item.title ? (
-                          <span title={item.title}>
-                            {item.title.length > 85 ? item.title.substring(0, 85) + "..." : item.title}
-                          </span>
-                        ) : (
-                          <span style={{ color: "var(--text-dim)" }}>No description</span>
-                        )}
-                      </td>
-                      <td className="metric-num">
-                        {item.views !== null ? (
-                          <span style={{ color: "#38bdf8" }}>{item.views.toLocaleString()}</span>
-                        ) : (
-                          <span style={{ color: "var(--text-dim)" }}>N/A</span>
-                        )}
-                      </td>
-                      <td className="metric-num">
-                        {item.likes !== null ? item.likes.toLocaleString() : "N/A"}
-                      </td>
-                      <td className="metric-num">
-                        {item.comments !== null ? item.comments.toLocaleString() : "—"}
-                      </td>
-                      <td className="metric-num">
-                        {item.shares !== null ? item.shares.toLocaleString() : "—"}
-                      </td>
-                      <td style={{ color: "var(--text-muted)", fontSize: "0.8rem", whiteSpace: "nowrap" }}>
-                        {item.postDate || "N/A"}
-                      </td>
-                      <td>
+                      {showOptionalCols && (
+                        <td className="table-caption">
+                          {item.title ? (
+                            <span title={item.title}>
+                              {item.title.length > 90 ? item.title.substring(0, 90) + "..." : item.title}
+                            </span>
+                          ) : (
+                            <span className="text-dim">No description</span>
+                          )}
+                        </td>
+                      )}
+                      {showOptionalCols && (
+                        <td>
+                          {item.thumbnail ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={item.thumbnail} alt="thumbnail" className="video-thumb-mini" />
+                          ) : (
+                            <div className="video-thumb-mini thumb-fallback">
+                              N/A
+                            </div>
+                          )}
+                        </td>
+                      )}
+                      {showOptionalCols && (
+                        <td className="td-date">
+                          {item.postDate || "N/A"}
+                        </td>
+                      )}
+                      <td style={{ textAlign: "center" }}>
                         <a href={item.url} target="_blank" rel="noopener noreferrer" className="link-btn">
                           Open ↗
                         </a>
@@ -682,76 +730,82 @@ export default function Home() {
               <table className="custom-table">
                 <thead>
                   <tr>
-                    <th>#</th>
-                    <th>Media</th>
-                    <th>Author</th>
-                    <th>Title</th>
-                    <th>Views</th>
-                    <th>Likes</th>
-                    <th>Comments</th>
-                    <th>Shares</th>
-                    <th>Saves</th>
-                    <th>Total Int.</th>
-                    <th>Release Date</th>
-                    <th>Link</th>
+                    <th style={{ width: "45px", textAlign: "center" }}>#</th>
+                    <th className="th-num">Views</th>
+                    <th className="th-num">Likes</th>
+                    <th className="th-num">Comments</th>
+                    <th className="th-num">Shares</th>
+                    <th className="th-num">Saves</th>
+                    <th className="th-num">Total Int.</th>
+                    <th style={{ width: "160px" }}>Author</th>
+                    {showOptionalCols && <th>Title</th>}
+                    {showOptionalCols && <th style={{ width: "56px" }}>Media</th>}
+                    {showOptionalCols && <th style={{ width: "105px" }}>Release Date</th>}
+                    <th style={{ width: "75px", textAlign: "center" }}>Link</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredTt.map((item, idx) => (
                     <tr key={item.url + idx}>
-                      <td style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
+                      <td className="td-index">
                         {idx + 1}
                       </td>
-                      <td>
-                        {item.thumbnail ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={item.thumbnail} alt="thumbnail" className="video-thumb-mini" />
-                        ) : (
-                          <div className="video-thumb-mini" style={{ display: "grid", placeContent: "center", fontSize: "0.7rem", color: "#64748b" }}>
-                            N/A
-                          </div>
-                        )}
-                      </td>
-                      <td style={{ fontWeight: 600, color: "#f43f5e", whiteSpace: "nowrap" }}>
-                        {item.author || "—"}
-                      </td>
-                      <td style={{ maxWidth: "300px", whiteSpace: "normal" }}>
-                        {item.title ? (
-                          <span title={item.title}>
-                            {item.title.length > 80 ? item.title.substring(0, 80) + "..." : item.title}
-                          </span>
-                        ) : (
-                          <span style={{ color: "var(--text-dim)" }}>No title</span>
-                        )}
-                      </td>
-                      <td className="metric-num">
+                      <td className="td-num">
                         {item.views !== null ? (
-                          <span style={{ color: "#38bdf8" }}>{item.views.toLocaleString()}</span>
+                          <span>{item.views.toLocaleString()}</span>
                         ) : (
-                          <span style={{ color: "var(--text-dim)" }}>N/A</span>
+                          <span className="text-dim">N/A</span>
                         )}
                       </td>
-                      <td className="metric-num">
-                        {item.likes !== null ? item.likes.toLocaleString() : "N/A"}
+                      <td className="td-num">
+                        {item.likes !== null ? item.likes.toLocaleString() : <span className="text-dim">N/A</span>}
                       </td>
-                      <td className="metric-num">
-                        {item.comments !== null ? item.comments.toLocaleString() : "N/A"}
+                      <td className="td-num">
+                        {item.comments !== null ? item.comments.toLocaleString() : <span className="text-dim">N/A</span>}
                       </td>
-                      <td className="metric-num">
-                        {item.shares !== null ? item.shares.toLocaleString() : "N/A"}
+                      <td className="td-num">
+                        {item.shares !== null ? item.shares.toLocaleString() : <span className="text-dim">N/A</span>}
                       </td>
-                      <td className="metric-num">
-                        {item.saves !== null ? item.saves.toLocaleString() : "N/A"}
+                      <td className="td-num">
+                        {item.saves !== null ? item.saves.toLocaleString() : <span className="text-dim">N/A</span>}
                       </td>
-                      <td className="metric-num" style={{ color: "#a855f7" }}>
+                      <td className="td-num" style={{ fontWeight: 700 }}>
                         {item.totalInteractions !== null
                           ? item.totalInteractions.toLocaleString()
-                          : "N/A"}
+                          : <span className="text-dim">N/A</span>}
                       </td>
-                      <td style={{ color: "var(--text-muted)", fontSize: "0.8rem", whiteSpace: "nowrap" }}>
-                        {item.postDate || "N/A"}
+                      <td className="table-author">
+                        {item.author || "—"}
                       </td>
-                      <td>
+                      {showOptionalCols && (
+                        <td className="table-caption">
+                          {item.title ? (
+                            <span title={item.title}>
+                              {item.title.length > 85 ? item.title.substring(0, 85) + "..." : item.title}
+                            </span>
+                          ) : (
+                            <span className="text-dim">No title</span>
+                          )}
+                        </td>
+                      )}
+                      {showOptionalCols && (
+                        <td>
+                          {item.thumbnail ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={item.thumbnail} alt="thumbnail" className="video-thumb-mini" />
+                          ) : (
+                            <div className="video-thumb-mini thumb-fallback">
+                              N/A
+                            </div>
+                          )}
+                        </td>
+                      )}
+                      {showOptionalCols && (
+                        <td className="td-date">
+                          {item.postDate || "N/A"}
+                        </td>
+                      )}
+                      <td style={{ textAlign: "center" }}>
                         <a href={item.url} target="_blank" rel="noopener noreferrer" className="link-btn">
                           Open ↗
                         </a>
