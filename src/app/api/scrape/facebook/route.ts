@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { asRecord, embeddedJson, objects, parseCount } from "@/lib/scrape";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -40,15 +41,17 @@ function parseNumberString(str: string | null | undefined): number | null {
   const unit = (match[2] || "").toLowerCase();
 
   let multiplier = 1;
-  if (unit.startsWith("k") || unit.includes("nghìn") || unit.includes("ngàn")) {
+  if (unit === "k" || unit.includes("nghìn") || unit.includes("ngàn")) {
     multiplier = 1000;
-  } else if (unit.startsWith("m") || unit.startsWith("tr") || unit.includes("triệu")) {
+  } else if (unit === "m" || unit === "tr" || unit.includes("triệu")) {
     multiplier = 1000000;
-  } else if (unit.startsWith("b") || unit.startsWith("t") || unit.includes("tỉ") || unit.includes("tỷ")) {
+  } else if (unit === "b" || unit.includes("tỉ") || unit.includes("tỷ")) {
     multiplier = 1000000000;
   }
 
   // Handle dot vs comma decimal notation
+  if ((numPart.match(/\./g) || []).length > 1) numPart = numPart.replace(/\./g, "");
+  if ((numPart.match(/,/g) || []).length > 1) numPart = numPart.replace(/,/g, "");
   if (numPart.includes(",") && numPart.includes(".")) {
     numPart = numPart.replace(/,/g, "");
   } else if (numPart.includes(",")) {
@@ -110,6 +113,62 @@ function parseTitleAndAuthor(ogTitle: string, ogDesc: string): { author: string;
   };
 }
 
+function extractVideoMetrics(html: string, videoId: string, result: FacebookScrapedItem) {
+  const matchesId = (record: Record<string, unknown>) =>
+    [record.id, record.video_id, record.videoId, record.legacy_fbid].some((id) => String(id) === videoId);
+
+  const count = (value: unknown) => {
+    const record = asRecord(value);
+    return parseCount(record ? record.total_count ?? record.count : value);
+  };
+
+  const apply = (record: Record<string, unknown>) => {
+    result.views ??= count(record.play_count) ?? count(record.video_view_count) ?? count(record.view_count);
+    result.likes ??= count(record.reaction_count) ?? count(record.like_count) ?? count(record.likers) ?? count(record.unified_reactors);
+    result.comments ??= count(record.total_comment_count) ?? count(record.comment_count) ?? count(record.comments_count);
+    result.shares ??= count(record.share_count) ?? count(record.shares_count) ?? parseCount(record.share_count_reduced);
+    const timestamp = parseCount(record.creation_time ?? record.publish_time ?? record.upload_time);
+    if (result.postDate === "N/A" && timestamp !== null && timestamp >= 100000000 && timestamp <= 9999999999) {
+      result.postDate = new Date(timestamp * 1000).toISOString().split("T")[0];
+    }
+  };
+
+  const roots = [...embeddedJson(html)];
+  const originalStoryIds = new Set<string>();
+  for (const root of roots) {
+    for (const record of objects(root)) {
+      if (!matchesId(record)) continue;
+      apply(record);
+      const feedback = asRecord(record.feedback);
+      if (feedback) apply(feedback);
+      const story = asRecord(record.creation_story);
+      if (story) {
+        if (story.id) originalStoryIds.add(String(story.id));
+        const storyFeedback = asRecord(story.feedback);
+        if (storyFeedback) apply(storyFeedback);
+      }
+    }
+  }
+  // Shared posts can attach the same video but have separate engagement counts.
+  for (const root of roots) {
+    for (const record of objects(root)) {
+      if (!originalStoryIds.has(String(record.id))) continue;
+      const feedback = asRecord(record.feedback);
+      if (feedback) apply(feedback);
+    }
+  }
+}
+
+function metaContent(html: string, name: string): string {
+  for (const tag of html.matchAll(/<meta\b[^>]*>/gi)) {
+    const property = tag[0].match(/(?:property|name)=["']([^"']+)["']/i)?.[1];
+    if (property === name) {
+      return decodeHtmlEntities(tag[0].match(/content=(["'])([\s\S]*?)\1/i)?.[2] || "");
+    }
+  }
+  return "";
+}
+
 async function scrapeSingleFacebook(url: string): Promise<FacebookScrapedItem> {
   const videoId = extractId(url);
   const result: FacebookScrapedItem = {
@@ -117,8 +176,8 @@ async function scrapeSingleFacebook(url: string): Promise<FacebookScrapedItem> {
     id: videoId,
     views: null,
     likes: null,
-    comments: 0,
-    shares: 0,
+    comments: null,
+    shares: null,
     author: "",
     title: "",
     postDate: "N/A",
@@ -141,142 +200,48 @@ async function scrapeSingleFacebook(url: string): Promise<FacebookScrapedItem> {
     "Sec-Fetch-Dest": "document",
   };
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 9000);
-
-    const resp = await fetch(`https://www.facebook.com/reel/${videoId}`, {
-      signal: controller.signal,
-      headers,
-      next: { revalidate: 0 },
-    });
-    clearTimeout(timeout);
-
-    const html = await resp.text();
-
-    const rawOgTitle =
-      html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
-      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)?.[1] ||
-      "";
-    const ogTitle = decodeHtmlEntities(rawOgTitle);
-
-    const rawOgDesc =
-      html.match(/<meta[^>]+property=["']og:description["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
-      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:description["']/i)?.[1] ||
-      "";
-    const ogDesc = decodeHtmlEntities(rawOgDesc);
-
-    const rawOgImage =
-      html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)?.[1] ||
-      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i)?.[1] ||
-      "";
-    result.thumbnail = decodeHtmlEntities(rawOgImage);
-
-    // 1. Extract Views & Likes from ogTitle (handles "1,3 triệu lượt xem", "126K lượt xem", etc.)
-    const viewsMatch = ogTitle.match(
-      /([\d.,]+)\s*([a-zA-Z\u00C0-\u024F\u1EA0-\u1EF9]+)?\s*(?:lượt xem|views)/i
-    );
-    if (viewsMatch) {
-      result.views = parseNumberString(`${viewsMatch[1]} ${viewsMatch[2] || ""}`);
-    }
-
-    const likesMatch = ogTitle.match(
-      /([\d.,]+)\s*([a-zA-Z\u00C0-\u024F\u1EA0-\u1EF9]+)?\s*(?:cảm xúc|lượt thích|reactions|likes)/i
-    );
-    if (likesMatch) {
-      result.likes = parseNumberString(`${likesMatch[1]} ${likesMatch[2] || ""}`);
-    }
-
-    // 2. Anchored JSON extraction around videoId occurrences in page source
-    const indices = [...html.matchAll(new RegExp(videoId, "g"))].map((m) => m.index);
-    let commentsFound: number | null = null;
-    let sharesFound: number | null = null;
-
-    for (const idx of indices) {
-      const chunk = html.substring(Math.max(0, idx - 1500), Math.min(html.length, idx + 3500));
-
-      if (result.likes === null) {
-        const lm =
-          chunk.match(/["'](?:likers|unified_reactors|reaction_count)["']\s*:\s*\{["']count["']\s*:\s*(\d+)/i) ||
-          chunk.match(/["']like_count["']\s*:\s*\{["']total_count["']\s*:\s*(\d+)/i);
-        if (lm) result.likes = parseInt(lm[1], 10);
+  let ogTitle = "";
+  let ogDesc = "";
+  let fetchError = "";
+  // Try both pages for exact, video-specific counts before using rounded metadata.
+  for (const pageUrl of [`https://www.facebook.com/reel/${videoId}`, `https://www.facebook.com/watch/?v=${videoId}`]) {
+    try {
+      const resp = await fetch(pageUrl, { headers, signal: AbortSignal.timeout(9000), cache: "no-store" });
+      if (!resp.ok) throw new Error(`Facebook returned HTTP ${resp.status}`);
+      if (resp.url && extractId(resp.url) !== videoId) throw new Error("Facebook redirected away from the requested video");
+      const html = await resp.text();
+      extractVideoMetrics(html, videoId, result);
+      const canonical = metaContent(html, "og:url");
+      if (!canonical || extractId(canonical) === videoId) {
+        ogTitle ||= metaContent(html, "og:title");
+        ogDesc ||= metaContent(html, "og:description");
+        result.thumbnail ||= metaContent(html, "og:image");
       }
-
-      if (commentsFound === null) {
-        const cm =
-          chunk.match(/"total_comment_count":\s*(\d+)/i) ||
-          chunk.match(/"comment_count":\s*\{"total_count":\s*(\d+)/i);
-        if (cm) commentsFound = parseInt(cm[1], 10);
-      }
-
-      if (sharesFound === null) {
-        const sm =
-          chunk.match(/"share_count_reduced":\s*"(\d+)"/i) ||
-          chunk.match(/"share_count":\s*\{"count":\s*(\d+)/i);
-        if (sm) sharesFound = parseInt(sm[1], 10);
-      }
-
-      if (result.postDate === "N/A") {
-        const tm = chunk.match(/"(?:creation_time|publish_time|upload_time)":\s*(\d{9,10})/i);
-        if (tm) {
-          result.postDate = new Date(parseInt(tm[1], 10) * 1000).toISOString().split("T")[0];
-        }
-      }
+      if ([result.views, result.likes, result.comments, result.shares].every((value) => value !== null)) break;
+    } catch (err: unknown) {
+      fetchError = err instanceof Error ? err.message : "Scraping failed";
     }
-
-    // Fallback general regex across entire HTML
-    if (commentsFound === null) {
-      const cm = html.match(/"total_comment_count":\s*(\d+)/i);
-      if (cm) commentsFound = parseInt(cm[1], 10);
-    }
-    if (sharesFound === null) {
-      const sm = html.match(/"share_count_reduced":\s*"(\d+)"/i);
-      if (sm) sharesFound = parseInt(sm[1], 10);
-    }
-    if (result.likes === null) {
-      const lm = html.match(/["'](?:likers|unified_reactors|reaction_count)["']\s*:\s*\{["']count["']\s*:\s*(\d+)/i);
-      if (lm) result.likes = parseInt(lm[1], 10);
-    }
-    if (result.postDate === "N/A") {
-      const tm = html.match(/"(?:creation_time|publish_time|upload_time)":\s*(\d{9,10})/i);
-      if (tm) {
-        result.postDate = new Date(parseInt(tm[1], 10) * 1000).toISOString().split("T")[0];
-      }
-    }
-
-    result.comments = commentsFound ?? 0;
-    result.shares = sharesFound ?? 0;
-
-    // 3. Fallback to watch_url if views is still missing
-    if (result.views === null) {
-      try {
-        const wResp = await fetch(`https://www.facebook.com/watch/?v=${videoId}`, {
-          headers,
-          next: { revalidate: 0 },
-        });
-        const wHtml = await wResp.text();
-        const vm = wHtml.match(/"(?:play_count|video_view_count|view_count)":\s*(\d+)/i);
-        if (vm) result.views = parseInt(vm[1], 10);
-
-        if (result.likes === null) {
-          const wLm = wHtml.match(
-            /["'](?:reaction_count|like_count|likers)["']\s*:\s*\{["'](?:count|total_count)["']\s*:\s*(\d+)/i
-          );
-          if (wLm) result.likes = parseInt(wLm[1], 10);
-        }
-      } catch {
-        // Ignore fallback failure
-      }
-    }
-
-    // Parse Author & Title
-    const { author, title } = parseTitleAndAuthor(ogTitle, ogDesc);
-    result.author = author;
-    result.title = title;
-  } catch (err: unknown) {
-    result.error = err instanceof Error ? err.message : "Scraping failed";
   }
 
+  // Metadata is a last resort; abbreviated values are explicitly marked approximate.
+  const approximate: string[] = [];
+  for (const [field, label] of [["views", "lượt xem|views"], ["likes", "cảm xúc|lượt thích|reactions|likes"]] as const) {
+    if (result[field] !== null) continue;
+    const match = ogTitle.match(new RegExp(`([\\d.,]+)\\s*([a-zA-Z\\u00C0-\\u024F\\u1EA0-\\u1EF9]+)?\\s*(?:${label})`, "i"));
+    if (match) {
+      result[field] = parseNumberString(`${match[1]} ${match[2] || ""}`);
+      if (result[field] !== null && match[2]) approximate.push(field);
+    }
+  }
+
+  const { author, title } = parseTitleAndAuthor(ogTitle, ogDesc);
+  result.author = author;
+  result.title = title;
+  const missing = (["views", "likes", "comments", "shares"] as const).filter((field) => result[field] === null);
+  const messages = [];
+  if (approximate.length) messages.push(`Approximate ${approximate.join(", ")} from page metadata`);
+  if (missing.length) messages.push(`Unavailable: ${missing.join(", ")}${fetchError ? ` (${fetchError})` : ""}`);
+  if (messages.length) result.error = messages.join("; ");
   return result;
 }
 
@@ -297,7 +262,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Limit batch size to prevent serverless timeout
-    const batch = cleanUrls.slice(0, 50);
+    if (cleanUrls.length > 50) {
+      return NextResponse.json({ error: "Send at most 50 URLs per request" }, { status: 400 });
+    }
+    const batch = cleanUrls;
     const results = await Promise.all(batch.map((url) => scrapeSingleFacebook(url)));
 
     return NextResponse.json({

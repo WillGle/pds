@@ -118,27 +118,32 @@ export default function Home() {
     const start = performance.now();
 
     try {
-      const resp = await fetch("/api/scrape/facebook", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls }),
-      });
-      const data = await resp.json();
-      if (Array.isArray(data.data)) {
-        setFbResults(
-          data.data.map((item: any) => ({
+      for (let i = 0; i < urls.length; i += 10) {
+        const batch = urls.slice(i, i + 10);
+        try {
+          const resp = await fetch("/api/scrape/facebook", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ urls: batch }),
+          });
+          const data = await resp.json();
+          if (!resp.ok || !Array.isArray(data.data)) throw new Error(data.error || "Facebook extraction failed");
+          setFbResults((prev) => [...prev, ...data.data.map((item: FacebookItem) => ({
             url: item.url,
-            views: item.views,
-            likes: item.likes,
-            comments: item.comments,
-            shares: item.shares,
+            views: item.views ?? null,
+            likes: item.likes ?? null,
+            comments: item.comments ?? null,
+            shares: item.shares ?? null,
             author: item.author || "—",
             error: item.error,
-          }))
-        );
+          }))]);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : "Request failed";
+          setFbResults((prev) => [...prev, ...batch.map((url) => ({
+            url, views: null, likes: null, comments: null, shares: null, author: "—", error: message,
+          }))]);
+        }
       }
-    } catch (err) {
-      console.error("Facebook scraping failed", err);
     } finally {
       setFbLoading(false);
       setFbElapsed(+((performance.now() - start) / 1000).toFixed(2));
@@ -177,17 +182,17 @@ export default function Home() {
             body: JSON.stringify({ url: currentUrl }),
           });
           const resJson = await resp.json();
-          if (resJson.data) {
+          if (resp.ok && resJson.data) {
             const d = resJson.data;
             setTtResults((prev) => [
               ...prev,
               {
                 url: d.url || currentUrl,
-                views: d.views,
-                likes: d.likes,
-                comments: d.comments,
-                shares: d.shares,
-                saves: d.saves,
+                views: d.views ?? null,
+                likes: d.likes ?? null,
+                comments: d.comments ?? null,
+                shares: d.shares ?? null,
+                saves: d.saves ?? null,
                 author: d.author || "—",
                 error: d.error,
               },
@@ -328,10 +333,10 @@ export default function Home() {
           linkUrl: item.url,
           linkText: formatShortLink(item.url),
           nums: [
-            item.views !== null ? item.views : 0,
-            item.likes !== null ? item.likes : 0,
-            item.comments !== null ? item.comments : 0,
-            item.shares !== null ? item.shares : 0,
+            item.views ?? "",
+            item.likes ?? "",
+            item.comments ?? "",
+            item.shares ?? "",
           ],
         }))
       : filteredTt.map((item) => ({
@@ -339,11 +344,11 @@ export default function Home() {
           linkUrl: item.url,
           linkText: formatShortLink(item.url),
           nums: [
-            item.views !== null ? item.views : 0,
-            item.likes !== null ? item.likes : 0,
-            item.comments !== null ? item.comments : 0,
-            item.shares !== null ? item.shares : 0,
-            item.saves !== null ? item.saves : 0,
+            item.views ?? "",
+            item.likes ?? "",
+            item.comments ?? "",
+            item.shares ?? "",
+            item.saves ?? "",
           ],
         }));
 
@@ -386,17 +391,17 @@ export default function Home() {
 
     const numRows = isFb
       ? filteredFb.map((item) => [
-          item.views !== null ? item.views : 0,
-          item.likes !== null ? item.likes : 0,
-          item.comments !== null ? item.comments : 0,
-          item.shares !== null ? item.shares : 0,
+          item.views ?? "",
+          item.likes ?? "",
+          item.comments ?? "",
+          item.shares ?? "",
         ])
       : filteredTt.map((item) => [
-          item.views !== null ? item.views : 0,
-          item.likes !== null ? item.likes : 0,
-          item.comments !== null ? item.comments : 0,
-          item.shares !== null ? item.shares : 0,
-          item.saves !== null ? item.saves : 0,
+          item.views ?? "",
+          item.likes ?? "",
+          item.comments ?? "",
+          item.shares ?? "",
+          item.saves ?? "",
         ]);
 
     const tsvContent = numRows.map((r) => r.join("\t")).join("\r\n");
@@ -423,19 +428,19 @@ export default function Home() {
       ? fbResults.map((r) => ({
           Author: r.author || "",
           Link: r.url,
-          Views: r.views ?? 0,
-          Likes: r.likes ?? 0,
-          Comments: r.comments ?? 0,
-          Shares: r.shares ?? 0,
+          Views: r.views ?? "",
+          Likes: r.likes ?? "",
+          Comments: r.comments ?? "",
+          Shares: r.shares ?? "",
         }))
       : ttResults.map((r) => ({
           Author: r.author || "",
           Link: r.url,
-          Views: r.views ?? 0,
-          Likes: r.likes ?? 0,
-          Comments: r.comments ?? 0,
-          Shares: r.shares ?? 0,
-          Saves: r.saves ?? 0,
+          Views: r.views ?? "",
+          Likes: r.likes ?? "",
+          Comments: r.comments ?? "",
+          Shares: r.shares ?? "",
+          Saves: r.saves ?? "",
         }));
 
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
@@ -451,19 +456,19 @@ export default function Home() {
       ? fbResults.map((r) => ({
           Author: r.author || "",
           Link: r.url,
-          Views: r.views ?? 0,
-          Likes: r.likes ?? 0,
-          Comments: r.comments ?? 0,
-          Shares: r.shares ?? 0,
+          Views: r.views ?? "",
+          Likes: r.likes ?? "",
+          Comments: r.comments ?? "",
+          Shares: r.shares ?? "",
         }))
       : ttResults.map((r) => ({
           Author: r.author || "",
           Link: r.url,
-          Views: r.views ?? 0,
-          Likes: r.likes ?? 0,
-          Comments: r.comments ?? 0,
-          Shares: r.shares ?? 0,
-          Saves: r.saves ?? 0,
+          Views: r.views ?? "",
+          Likes: r.likes ?? "",
+          Comments: r.comments ?? "",
+          Shares: r.shares ?? "",
+          Saves: r.saves ?? "",
         }));
 
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
@@ -689,7 +694,7 @@ export default function Home() {
               <div className="kpi-val">
                 {(activeTab === "facebook" ? fbStats.totalViews : ttStats.totalViews).toLocaleString()}
               </div>
-              <div className="kpi-label">Cumulative Views</div>
+              <div className="kpi-label">Cumulative Views (available)</div>
             </div>
           </div>
 
@@ -699,7 +704,7 @@ export default function Home() {
               <div className="kpi-val">
                 {(activeTab === "facebook" ? fbStats.totalLikes : ttStats.totalLikes).toLocaleString()}
               </div>
-              <div className="kpi-label">Cumulative Likes</div>
+              <div className="kpi-label">Cumulative Likes (available)</div>
             </div>
           </div>
         </section>
@@ -780,7 +785,7 @@ export default function Home() {
                     <th className="th-num" style={{ width: "85px" }}>Likes</th>
                     <th className="th-num" style={{ width: "85px" }}>Comments</th>
                     <th className="th-num" style={{ width: "85px" }}>Shares</th>
-                    <th style={{ width: "auto" }}></th>
+                    <th style={{ width: "auto" }}>Status</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -815,7 +820,7 @@ export default function Home() {
                       <td className="td-num">
                         {item.shares !== null ? item.shares.toLocaleString() : <span className="text-dim">—</span>}
                       </td>
-                      <td></td>
+                      <td style={{ whiteSpace: "normal", fontSize: "0.8rem" }}>{item.error || "OK"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -832,7 +837,7 @@ export default function Home() {
                     <th className="th-num" style={{ width: "85px" }}>Comments</th>
                     <th className="th-num" style={{ width: "85px" }}>Shares</th>
                     <th className="th-num" style={{ width: "85px" }}>Saves</th>
-                    <th style={{ width: "auto" }}></th>
+                    <th style={{ width: "auto" }}>Status</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -870,7 +875,7 @@ export default function Home() {
                       <td className="td-num">
                         {item.saves !== null ? item.saves.toLocaleString() : <span className="text-dim">N/A</span>}
                       </td>
-                      <td></td>
+                      <td style={{ whiteSpace: "normal", fontSize: "0.8rem" }}>{item.error || "OK"}</td>
                     </tr>
                   ))}
                 </tbody>
