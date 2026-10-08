@@ -30,3 +30,11 @@ export function* embeddedJson(html: string): Generator<unknown> {
     }
   }
 }
+
+export function formatPostDate(value: unknown): string | null {
+  const timestamp = parseCount(value);
+  if (timestamp === null || timestamp < 100000000 || timestamp > 9999999999) return null;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Ho_Chi_Minh", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date(timestamp * 1000));
+}

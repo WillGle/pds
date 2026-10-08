@@ -5,11 +5,13 @@ import * as XLSX from "xlsx";
 
 interface FacebookItem {
   url: string;
+  viewsText?: string | null;
   views: number | null;
   likes: number | null;
   comments: number | null;
   shares: number | null;
   author: string;
+  postDate: string | null;
   error?: string;
 }
 
@@ -21,6 +23,7 @@ interface TikTokItem {
   shares: number | null;
   saves: number | null;
   author: string;
+  postDate: string | null;
   error?: string;
 }
 
@@ -65,6 +68,24 @@ function formatShortLink(url: string): string {
   return url.replace(/^https?:\/\/(?:www\.)?/, "").split("?")[0].replace(/\/$/, "");
 }
 
+function hasCompleteMetrics(item: FacebookItem | TikTokItem): boolean {
+  const compactViews = "viewsText" in item && typeof item.viewsText === "string" && /^\d+(?:[.,]\d+)?\s*(?:[KMB]|nghìn|triệu|tỷ)?$/i.test(item.viewsText);
+  const values = [item.likes, item.comments, item.shares];
+  if (!compactViews || item.views !== null) values.push(item.views);
+  if ("saves" in item) values.push(item.saves);
+  return !item.error && typeof item.postDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(item.postDate) && values.every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+}
+
+function facebookViews(item: FacebookItem): number | string {
+  return item.views ?? (item.viewsText ? `${item.viewsText} (rounded)` : "");
+}
+
+function mergeRows<T extends { url: string }>(previous: T[], incoming: T[], retry: boolean): T[] {
+  if (!retry) return [...previous, ...incoming];
+  const replacements = new Map(incoming.map((item) => [item.url, item]));
+  return previous.map((item) => replacements.get(item.url) || item);
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<"facebook" | "tiktok">("facebook");
 
@@ -101,8 +122,8 @@ export default function Home() {
   }, [fbLoading, ttLoading]);
 
   // Handle Facebook scrape
-  const handleScrapeFacebook = async () => {
-    const urls = Array.from(
+  const handleScrapeFacebook = async (retryUrls?: string[]) => {
+    const urls = retryUrls ?? Array.from(
       new Set(
         fbInput
           .split("\n")
@@ -113,13 +134,13 @@ export default function Home() {
     if (urls.length === 0) return;
 
     setFbLoading(true);
-    setFbResults([]);
+    if (!retryUrls) setFbResults([]);
     setFbElapsed(null);
     const start = performance.now();
 
     try {
-      for (let i = 0; i < urls.length; i += 10) {
-        const batch = urls.slice(i, i + 10);
+      for (let i = 0; i < urls.length; i += 1) {
+        const batch = urls.slice(i, i + 1);
         try {
           const resp = await fetch("/api/scrape/facebook", {
             method: "POST",
@@ -128,20 +149,27 @@ export default function Home() {
           });
           const data = await resp.json();
           if (!resp.ok || !Array.isArray(data.data)) throw new Error(data.error || "Facebook extraction failed");
-          setFbResults((prev) => [...prev, ...data.data.map((item: FacebookItem) => ({
-            url: item.url,
-            views: item.views ?? null,
-            likes: item.likes ?? null,
-            comments: item.comments ?? null,
-            shares: item.shares ?? null,
-            author: item.author || "—",
-            error: item.error,
-          }))]);
+          const returned = new Map<string, FacebookItem>(data.data.map((item: FacebookItem) => [item.url, item]));
+          const incoming = batch.map((url) => {
+            const item = returned.get(url);
+            return {
+              url,
+              views: item?.views ?? null,
+              viewsText: item?.viewsText ?? null,
+              likes: item?.likes ?? null,
+              comments: item?.comments ?? null,
+              shares: item?.shares ?? null,
+              author: item?.author || "—",
+              postDate: item?.postDate ?? null,
+              error: item?.error || (!item ? "No result returned for this URL" : undefined),
+            };
+          });
+          setFbResults((prev) => mergeRows(prev, incoming, !!retryUrls));
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : "Request failed";
-          setFbResults((prev) => [...prev, ...batch.map((url) => ({
-            url, views: null, likes: null, comments: null, shares: null, author: "—", error: message,
-          }))]);
+          setFbResults((prev) => mergeRows(prev, batch.map((url) => ({
+            url, views: null, likes: null, comments: null, shares: null, author: "—", postDate: null, error: message,
+          })), !!retryUrls));
         }
       }
     } finally {
@@ -151,8 +179,8 @@ export default function Home() {
   };
 
   // Handle TikTok scrape (progressive execution to respect 1 req/sec limit & prevent timeouts)
-  const handleScrapeTikTok = async () => {
-    const urls = Array.from(
+  const handleScrapeTikTok = async (retryUrls?: string[]) => {
+    const urls = retryUrls ?? Array.from(
       new Set(
         ttInput
           .split("\n")
@@ -164,7 +192,7 @@ export default function Home() {
 
     abortTtRef.current = false;
     setTtLoading(true);
-    setTtResults([]);
+    if (!retryUrls) setTtResults([]);
     setTtElapsed(null);
     setTtProgress({ current: 0, total: urls.length });
     const start = performance.now();
@@ -184,22 +212,21 @@ export default function Home() {
           const resJson = await resp.json();
           if (resp.ok && resJson.data) {
             const d = resJson.data;
-            setTtResults((prev) => [
-              ...prev,
+            setTtResults((prev) => mergeRows(prev, [
               {
-                url: d.url || currentUrl,
+                url: currentUrl,
                 views: d.views ?? null,
                 likes: d.likes ?? null,
                 comments: d.comments ?? null,
                 shares: d.shares ?? null,
                 saves: d.saves ?? null,
                 author: d.author || "—",
+                postDate: d.postDate ?? null,
                 error: d.error,
               },
-            ]);
+            ], !!retryUrls));
           } else {
-            setTtResults((prev) => [
-              ...prev,
+            setTtResults((prev) => mergeRows(prev, [
               {
                 url: currentUrl,
                 views: null,
@@ -208,14 +235,14 @@ export default function Home() {
                 shares: null,
                 saves: null,
                 author: "—",
+                postDate: null,
                 error: resJson.error || "Extraction failed",
               },
-            ]);
+            ], !!retryUrls));
           }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : "Request failed";
-          setTtResults((prev) => [
-            ...prev,
+          setTtResults((prev) => mergeRows(prev, [
             {
               url: currentUrl,
               views: null,
@@ -224,9 +251,10 @@ export default function Home() {
               shares: null,
               saves: null,
               author: "—",
+              postDate: null,
               error: msg,
             },
-          ]);
+          ], !!retryUrls));
         }
 
         if (i < urls.length - 1 && !abortTtRef.current) {
@@ -234,6 +262,15 @@ export default function Home() {
         }
       }
     } finally {
+      if (!retryUrls) {
+        setTtResults((prev) => {
+          const returned = new Map(prev.map((item) => [item.url, item]));
+          return urls.map((url) => returned.get(url) || {
+            url, views: null, likes: null, comments: null, shares: null, saves: null,
+            author: "—", postDate: null, error: "Not processed; retry this URL",
+          });
+        });
+      }
       setTtLoading(false);
       setTtProgress(null);
       setTtElapsed(+((performance.now() - start) / 1000).toFixed(2));
@@ -242,6 +279,7 @@ export default function Home() {
 
   // Immediate Garbage Collection Friendly Clear Handler
   const handleClear = () => {
+    if (fbLoading || ttLoading) return;
     if (activeTab === "facebook") {
       setFbInput("");
       setFbResults([]);
@@ -287,6 +325,10 @@ export default function Home() {
     return { total, totalViews, totalLikes };
   }, [ttResults]);
 
+  const activeResults = activeTab === "facebook" ? fbResults : ttResults;
+  const incompleteCount = activeResults.filter((item) => !hasCompleteMetrics(item)).length;
+  const canExport = activeResults.length > 0 && incompleteCount === 0 && !fbLoading && !ttLoading;
+
   // Helper to escape HTML characters
   const escapeHtml = (str: string) => {
     return str
@@ -321,19 +363,20 @@ export default function Home() {
   const copyAuthorLinkNumbers = async (withHeaders: boolean) => {
     const isFb = activeTab === "facebook";
     const data = isFb ? filteredFb : filteredTt;
-    if (data.length === 0) return;
+    if (!canExport || data.length === 0) return;
 
     const headers = isFb
-      ? ["Author", "Link", "Views", "Likes", "Comments", "Shares"]
-      : ["Author", "Link", "Views", "Likes", "Comments", "Shares", "Saves"];
+      ? ["Author", "Link", "Post Date", "Views", "Likes", "Comments", "Shares"]
+      : ["Author", "Link", "Post Date", "Views", "Likes", "Comments", "Shares", "Saves"];
 
     const rawRows = isFb
       ? filteredFb.map((item) => ({
           author: item.author || "—",
           linkUrl: item.url,
           linkText: formatShortLink(item.url),
+          postDate: item.postDate || "",
           nums: [
-            item.views ?? "",
+            facebookViews(item),
             item.likes ?? "",
             item.comments ?? "",
             item.shares ?? "",
@@ -343,6 +386,7 @@ export default function Home() {
           author: item.author || "—",
           linkUrl: item.url,
           linkText: formatShortLink(item.url),
+          postDate: item.postDate || "",
           nums: [
             item.views ?? "",
             item.likes ?? "",
@@ -353,7 +397,7 @@ export default function Home() {
         }));
 
     // TSV for spreadsheet cells
-    const tsvRows = rawRows.map((r) => [r.author, r.linkUrl, ...r.nums.map(String)].join("\t"));
+    const tsvRows = rawRows.map((r) => [r.author, r.linkUrl, r.postDate, ...r.nums.map(String)].join("\t"));
     const tsvContent = (withHeaders ? [headers.join("\t"), ...tsvRows] : tsvRows).join("\r\n");
 
     // HTML Table for rich text / documents / Google Sheets
@@ -361,7 +405,7 @@ export default function Home() {
     if (withHeaders) {
       htmlTable += `<thead><tr style="background:#f1f5f9;font-weight:bold;">`;
       for (const h of headers) {
-        const isNum = !["Author", "Link"].includes(h);
+        const isNum = !["Author", "Link", "Post Date"].includes(h);
         htmlTable += `<th style="padding:6px 12px;border:1px solid #cbd5e1;${isNum ? "text-align:right;" : "text-align:left;"}">${escapeHtml(h)}</th>`;
       }
       htmlTable += `</tr></thead>`;
@@ -371,6 +415,7 @@ export default function Home() {
       htmlTable += `<tr>`;
       htmlTable += `<td style="padding:6px 12px;border:1px solid #cbd5e1;font-weight:500;">${escapeHtml(r.author)}</td>`;
       htmlTable += `<td style="padding:6px 12px;border:1px solid #cbd5e1;"><a href="${escapeHtml(r.linkUrl)}">${escapeHtml(r.linkText)}</a></td>`;
+      htmlTable += `<td style="padding:6px 12px;border:1px solid #cbd5e1;">${escapeHtml(r.postDate)}</td>`;
       for (const n of r.nums) {
         htmlTable += `<td style="padding:6px 12px;border:1px solid #cbd5e1;text-align:right;">${n.toLocaleString()}</td>`;
       }
@@ -387,11 +432,11 @@ export default function Home() {
   const copyNumbersOnly = async () => {
     const isFb = activeTab === "facebook";
     const data = isFb ? filteredFb : filteredTt;
-    if (data.length === 0) return;
+    if (!canExport || data.length === 0) return;
 
     const numRows = isFb
       ? filteredFb.map((item) => [
-          item.views ?? "",
+          facebookViews(item),
           item.likes ?? "",
           item.comments ?? "",
           item.shares ?? "",
@@ -423,12 +468,14 @@ export default function Home() {
 
   // Export to Excel
   const exportToExcel = () => {
+    if (!canExport) return;
     const isFb = activeTab === "facebook";
     const dataToExport = isFb
       ? fbResults.map((r) => ({
           Author: r.author || "",
           Link: r.url,
-          Views: r.views ?? "",
+          "Post Date": r.postDate || "",
+          Views: facebookViews(r),
           Likes: r.likes ?? "",
           Comments: r.comments ?? "",
           Shares: r.shares ?? "",
@@ -436,6 +483,7 @@ export default function Home() {
       : ttResults.map((r) => ({
           Author: r.author || "",
           Link: r.url,
+          "Post Date": r.postDate || "",
           Views: r.views ?? "",
           Likes: r.likes ?? "",
           Comments: r.comments ?? "",
@@ -451,12 +499,14 @@ export default function Home() {
 
   // Export to CSV
   const exportToCsv = () => {
+    if (!canExport) return;
     const isFb = activeTab === "facebook";
     const dataToExport = isFb
       ? fbResults.map((r) => ({
           Author: r.author || "",
           Link: r.url,
-          Views: r.views ?? "",
+          "Post Date": r.postDate || "",
+          Views: facebookViews(r),
           Likes: r.likes ?? "",
           Comments: r.comments ?? "",
           Shares: r.shares ?? "",
@@ -464,6 +514,7 @@ export default function Home() {
       : ttResults.map((r) => ({
           Author: r.author || "",
           Link: r.url,
+          "Post Date": r.postDate || "",
           Views: r.views ?? "",
           Likes: r.likes ?? "",
           Comments: r.comments ?? "",
@@ -529,7 +580,7 @@ export default function Home() {
           {activeTab === "facebook" ? "📘 Input Facebook Video / Reel URLs" : "🎵 Input TikTok Video URLs"}
         </h2>
         <p className="card-subtitle">
-          Paste links below (one per line). Extract Author, Link, and Numbers ready for Google Sheets.
+          Paste links below (one per line). Extract Author, Link, Post Date (UTC+7), and Numbers ready for Google Sheets.
         </p>
 
         {activeTab === "facebook" ? (
@@ -556,7 +607,7 @@ export default function Home() {
               <button
                 id="fb-start-btn"
                 className="btn-primary"
-                onClick={handleScrapeFacebook}
+                onClick={() => handleScrapeFacebook()}
                 disabled={fbLoading || !fbInput.trim()}
               >
                 {fbLoading ? (
@@ -571,7 +622,7 @@ export default function Home() {
               <button
                 id="tt-start-btn"
                 className="btn-primary"
-                onClick={handleScrapeTikTok}
+                onClick={() => handleScrapeTikTok()}
                 disabled={ttLoading || !ttInput.trim()}
               >
                 {ttLoading ? (
@@ -610,6 +661,7 @@ export default function Home() {
 
             <button
               id="clear-input-btn"
+              disabled={fbLoading || ttLoading}
               className="btn-secondary"
               onClick={handleClear}
             >
@@ -694,7 +746,7 @@ export default function Home() {
               <div className="kpi-val">
                 {(activeTab === "facebook" ? fbStats.totalViews : ttStats.totalViews).toLocaleString()}
               </div>
-              <div className="kpi-label">Cumulative Views (available)</div>
+              <div className="kpi-label">Cumulative Views (exact counts only)</div>
             </div>
           </div>
 
@@ -737,6 +789,7 @@ export default function Home() {
 
               <button
                 id="copy-author-link-values-btn"
+                disabled={!canExport}
                 className="btn-primary"
                 onClick={() => copyAuthorLinkNumbers(false)}
                 title="Copy formatted table (HTML + TSV) for Google Sheets, Excel, Notion, Docs"
@@ -747,6 +800,7 @@ export default function Home() {
 
               <button
                 id="copy-author-link-headers-btn"
+                disabled={!canExport}
                 className="btn-secondary"
                 onClick={() => copyAuthorLinkNumbers(true)}
                 title="Copy table with header row"
@@ -756,6 +810,7 @@ export default function Home() {
 
               <button
                 id="copy-numbers-only-btn"
+                disabled={!canExport}
                 className="btn-secondary"
                 onClick={copyNumbersOnly}
                 title="Copy ONLY numbers"
@@ -763,15 +818,33 @@ export default function Home() {
                 {copiedType === "numbers-only" ? "✅ Copied Numbers!" : "📋 Numbers Only"}
               </button>
 
-              <button id="export-excel-btn" className="btn-secondary" onClick={exportToExcel}>
+              <button id="export-excel-btn" disabled={!canExport} className="btn-secondary" onClick={exportToExcel}>
                 📊 Excel
               </button>
 
-              <button id="export-csv-btn" className="btn-secondary" onClick={exportToCsv}>
+              <button id="export-csv-btn" disabled={!canExport} className="btn-secondary" onClick={exportToCsv}>
                 📄 CSV
               </button>
             </div>
           </div>
+
+          {incompleteCount > 0 && (
+            <div role="status" style={{ marginBottom: "1rem" }}>
+              <p>{incompleteCount} URLs still have missing or unverified counts or post dates. Copy and export are available after all URLs are complete.</p>
+              <button
+                id="retry-incomplete-btn"
+                className="btn-secondary"
+                disabled={fbLoading || ttLoading}
+                onClick={() => {
+                  const urls = activeResults.filter((item) => !hasCompleteMetrics(item)).map((item) => item.url);
+                  if (activeTab === "facebook") void handleScrapeFacebook(urls);
+                  else void handleScrapeTikTok(urls);
+                }}
+              >
+                Retry incomplete URLs
+              </button>
+            </div>
+          )}
 
           <div className="table-wrapper">
             {activeTab === "facebook" ? (
@@ -781,6 +854,7 @@ export default function Home() {
                     <th style={{ width: "38px", textAlign: "center" }}>#</th>
                     <th style={{ width: "160px" }}>Author</th>
                     <th style={{ width: "310px" }}>Link</th>
+                    <th style={{ width: "110px" }} title="Posting date in Vietnam time (UTC+7)">Post Date</th>
                     <th className="th-num" style={{ width: "95px" }}>Views</th>
                     <th className="th-num" style={{ width: "85px" }}>Likes</th>
                     <th className="th-num" style={{ width: "85px" }}>Comments</th>
@@ -804,9 +878,12 @@ export default function Home() {
                           {formatShortLink(item.url)}
                         </a>
                       </td>
+                      <td>{item.postDate || <span className="text-dim">N/A</span>}</td>
                       <td className="td-num">
                         {item.views !== null ? (
                           <span>{item.views.toLocaleString()}</span>
+                        ) : item.viewsText ? (
+                          <span>{facebookViews(item)}</span>
                         ) : (
                           <span className="text-dim">N/A</span>
                         )}
@@ -820,7 +897,7 @@ export default function Home() {
                       <td className="td-num">
                         {item.shares !== null ? item.shares.toLocaleString() : <span className="text-dim">—</span>}
                       </td>
-                      <td style={{ whiteSpace: "normal", fontSize: "0.8rem" }}>{item.error || "OK"}</td>
+                      <td style={{ whiteSpace: "normal", fontSize: "0.8rem" }}>{item.error || (hasCompleteMetrics(item) ? (item.views === null ? "Complete (rounded views)" : "Complete") : "Incomplete") }</td>
                     </tr>
                   ))}
                 </tbody>
@@ -832,6 +909,7 @@ export default function Home() {
                     <th style={{ width: "38px", textAlign: "center" }}>#</th>
                     <th style={{ width: "160px" }}>Author</th>
                     <th style={{ width: "310px" }}>Link</th>
+                    <th style={{ width: "110px" }} title="Posting date in Vietnam time (UTC+7)">Post Date</th>
                     <th className="th-num" style={{ width: "95px" }}>Views</th>
                     <th className="th-num" style={{ width: "85px" }}>Likes</th>
                     <th className="th-num" style={{ width: "85px" }}>Comments</th>
@@ -856,6 +934,7 @@ export default function Home() {
                           {formatShortLink(item.url)}
                         </a>
                       </td>
+                      <td>{item.postDate || <span className="text-dim">N/A</span>}</td>
                       <td className="td-num">
                         {item.views !== null ? (
                           <span>{item.views.toLocaleString()}</span>
@@ -875,7 +954,7 @@ export default function Home() {
                       <td className="td-num">
                         {item.saves !== null ? item.saves.toLocaleString() : <span className="text-dim">N/A</span>}
                       </td>
-                      <td style={{ whiteSpace: "normal", fontSize: "0.8rem" }}>{item.error || "OK"}</td>
+                      <td style={{ whiteSpace: "normal", fontSize: "0.8rem" }}>{item.error || (hasCompleteMetrics(item) ? "Complete" : "Incomplete") }</td>
                     </tr>
                   ))}
                 </tbody>

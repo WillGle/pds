@@ -1,14 +1,14 @@
 # Social Pulse Analytics (Vercel Native)
 
-A high-speed, serverless social media scraper and analytics dashboard for **Facebook Reels** and **TikTok Videos**, designed for 1-click deployment on **Vercel** with zero browser/Selenium overhead.
+A high-speed, serverless social media scraper and analytics dashboard for **Facebook Reels** and **TikTok Videos**, designed for 1-click deployment on **Vercel** with rendered Facebook counters and HTTP-based TikTok extraction.
 
 ---
 
 ## ✨ Features
 
-- **⚡ Zero-Browser Architecture**: Replaced heavy Selenium/Chromium headless instances with high-speed HTTP extractors running inside Vercel Serverless Functions.
-- **🚀 Ultra Fast**: Scrapes 10–20 links in **1–2 seconds** (over **10x faster** than headless Chrome).
-- **📘 Facebook Reels Scraper**: Extracts views, reaction counts, author name, video caption/description, release date, and direct thumbnail URLs via mobile OpenGraph metadata.
+- **Facebook counters**: Chromium reads rendered Watch views/comments and Reel shares. Reactions use Watch first, with Reel as fallback. Exact views must match the visible Watch counter; otherwise its compact label is retained and marked rounded in the table and exports. One URL is processed per serverless request; the UI processes the full list sequentially.
+- **Posting dates**: Dates come from the target video timestamp and are displayed/exported in Vietnam time (UTC+7). Incomplete rows can be retried; copy/export waits for a complete table.
+- **📘 Facebook Reels Scraper**: Extracts counts and posting dates from the requested video's rendered data, plus author, caption, and thumbnail metadata.
 - **🎵 TikTok Scraper**: Resolves short links (`vt.tiktok.com`, `vm.tiktok.com`), retrieves views, likes, comments, shares, saves, total interactions, author, and thumbnails.
 - **🏆 Top 5 Viral Showcase**: Automatically highlights the highest performing videos in interactive cards.
 - **📊 Export Options**: 1-click export to formatted Excel (`.xlsx`), CSV (UTF-8 BOM), or raw JSON clipboard.
@@ -26,6 +26,8 @@ A high-speed, serverless social media scraper and analytics dashboard for **Face
 ---
 
 ## 🚀 Local Development
+
+Use Node.js 22. For local Facebook scraping, set `CHROME_EXECUTABLE_PATH` to an installed Chromium/Chrome executable. Vercel uses the bundled Chromium binary.
 
 1. Install dependencies:
    ```bash
@@ -65,8 +67,7 @@ vercel
   ```json
   {
     "urls": [
-      "https://www.facebook.com/reel/1075481022014849",
-      "https://www.facebook.com/reel/1085809004361213"
+      "https://www.facebook.com/reel/1075481022014849"
     ]
   }
   ```

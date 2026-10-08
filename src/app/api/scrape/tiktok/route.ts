@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { asRecord, embeddedJson, objects, parseCount } from "@/lib/scrape";
+import { asRecord, embeddedJson, formatPostDate, objects, parseCount } from "@/lib/scrape";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -12,6 +12,7 @@ interface TikTokScrapedItem {
   shares: number | null;
   saves: number | null;
   author: string;
+  postDate: string | null;
   error?: string;
 }
 
@@ -62,14 +63,15 @@ async function scrapeSingleTikTok(rawUrl: string, deadline = Date.now() + 25000,
     shares: null,
     saves: null,
     author: "",
+    postDate: null,
   };
-  const fields = ["views", "likes", "comments", "shares", "saves"] as const;
+  const fields = ["views", "likes", "comments", "shares", "saves", "postDate"] as const;
   const complete = () => fields.every((field) => result[field] !== null);
   let fetchError = "";
   const signal = (milliseconds: number) => AbortSignal.timeout(Math.max(1, Math.min(milliseconds, deadline - Date.now())));
 
-  if (!cleanUrl) {
-    result.error = "Invalid or empty TikTok URL";
+  if (!videoId) {
+    result.error = "Could not resolve TikTok Video ID from URL";
     return result;
   }
 
@@ -90,9 +92,11 @@ async function scrapeSingleTikTok(rawUrl: string, deadline = Date.now() + 25000,
       const msg = String(resJson?.msg || "");
       if (resJson?.code === 0 && resJson.data) {
         const d = resJson.data;
-        if (videoId && d.aweme_id && String(d.aweme_id) !== videoId) {
+        const returnedId = d.aweme_id ?? d.id;
+        if (!returnedId || String(returnedId) !== videoId) {
           throw new Error("TikWM returned a different video");
         }
+        result.postDate = formatPostDate(d.create_time);
         result.views = parseCount(d.play_count);
         result.likes = parseCount(d.digg_count);
         result.comments = parseCount(d.comment_count);
@@ -131,6 +135,7 @@ async function scrapeSingleTikTok(rawUrl: string, deadline = Date.now() + 25000,
       for (const root of embeddedJson(html)) {
         for (const record of objects(root)) {
           if (String(record.id) !== videoId) continue;
+          result.postDate ??= formatPostDate(record.createTime);
           const stats = asRecord(record.stats);
           const statsV2 = asRecord(record.statsV2);
           if (!stats && !statsV2) continue;
@@ -176,7 +181,7 @@ export async function POST(req: NextRequest) {
     if (url && typeof url === "string" && url.trim()) {
       const result = await scrapeSingleTikTok(url.trim());
       return NextResponse.json({
-        success: true,
+        success: !result.error,
         data: result,
       });
     }
@@ -201,7 +206,7 @@ export async function POST(req: NextRequest) {
     for (let i = 0; i < batch.length; i++) {
       const item = Date.now() < deadline
         ? await scrapeSingleTikTok(batch[i], deadline)
-        : { url: batch[i], views: null, likes: null, comments: null, shares: null, saves: null, author: "", error: "Request time limit reached; retry this URL individually" };
+        : { url: batch[i], views: null, likes: null, comments: null, shares: null, saves: null, author: "", postDate: null, error: "Request time limit reached; retry this URL individually" };
       results.push(item);
       if (i < batch.length - 1 && deadline - Date.now() > 1150) {
         await sleep(1150);
@@ -209,7 +214,8 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json({
-      success: true,
+      success: results.every((item) => !item.error),
+      complete: results.filter((item) => !item.error).length,
       total: results.length,
       data: results,
     });
