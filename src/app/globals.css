@@ -180,6 +180,12 @@ body {
   color: #ffffff;
 }
 
+.tab-btn.active.yt {
+  background: #450a0a;
+  border-color: #ef4444;
+  color: #ffffff;
+}
+
 /* Clean Panels */
 .glass-card {
   background: var(--bg-panel);

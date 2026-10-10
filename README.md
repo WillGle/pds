@@ -1,6 +1,6 @@
 # Social Pulse Analytics (Vercel Native)
 
-A high-speed, serverless social media scraper and analytics dashboard for **Facebook Reels** and **TikTok Videos**, designed for 1-click deployment on **Vercel** with rendered Facebook counters and HTTP-based TikTok extraction.
+A high-speed, serverless social media scraper and analytics dashboard for **Facebook Reels**, **TikTok Videos**, and **YouTube Shorts & Videos**, designed for 1-click deployment on **Vercel** with rendered Facebook counters, HTTP-based TikTok extraction, and fast YouTube Innertube extraction.
 
 ---
 
@@ -10,8 +10,8 @@ A high-speed, serverless social media scraper and analytics dashboard for **Face
 - **Posting dates**: Dates come from the target video timestamp and are displayed/exported in Vietnam time (UTC+7). Incomplete rows can be retried; copy/export waits for a complete table.
 - **📘 Facebook Reels Scraper**: Extracts counts and posting dates from the requested video's rendered data, plus author, caption, and thumbnail metadata.
 - **🎵 TikTok Scraper**: Resolves short links (`vt.tiktok.com`, `vm.tiktok.com`), retrieves views, likes, comments, shares, saves, total interactions, author, and thumbnails.
-- **🏆 Top 5 Viral Showcase**: Automatically highlights the highest performing videos in interactive cards.
-- **📊 Export Options**: 1-click export to formatted Excel (`.xlsx`), CSV (UTF-8 BOM), or raw JSON clipboard.
+- **▶️ YouTube Scraper**: Supports standard videos, YouTube Shorts, and shortlinks (`youtu.be`). Extracts views, likes, exact comment count, author (channel name), and posting date (UTC+7) using lightweight serverless API calls.
+- **📊 Export Options**: 1-click export to formatted Excel (`.xlsx`), CSV (UTF-8 BOM), or dual HTML/TSV clipboard for Google Sheets, Excel, Notion, and Docs.
 - **🎨 Glassmorphic Dark UI**: Premium design built with modern CSS tokens, responsive layout, search filter, and live timers.
 
 ---
@@ -30,11 +30,13 @@ A high-speed, serverless social media scraper and analytics dashboard for **Face
 Use Node.js 22. For local Facebook scraping, set `CHROME_EXECUTABLE_PATH` to an installed Chromium/Chrome executable. Vercel uses the bundled Chromium binary.
 
 1. Install dependencies:
+
    ```bash
    npm install
    ```
 
 2. Start the development server:
+
    ```bash
    npm run dev
    ```
@@ -46,12 +48,14 @@ Use Node.js 22. For local Facebook scraping, set `CHROME_EXECUTABLE_PATH` to an 
 ## 🌐 Deploy to Vercel
 
 ### Method 1: Using the Vercel CLI
+
 ```bash
 npm i -g vercel
 vercel
 ```
 
 ### Method 2: Git Push to GitHub / GitLab / Bitbucket
+
 1. Push this repository to GitHub.
 2. Go to [vercel.com/new](https://vercel.com/new).
 3. Select your repository and click **Deploy**.
@@ -62,8 +66,10 @@ vercel
 ## 🔌 API Reference
 
 ### 1. Facebook Scraper
+
 - **Endpoint**: `POST /api/scrape/facebook`
 - **Body**:
+
   ```json
   {
     "urls": [
@@ -73,8 +79,10 @@ vercel
   ```
 
 ### 2. TikTok Scraper
+
 - **Endpoint**: `POST /api/scrape/tiktok`
 - **Body**:
+
   ```json
   {
     "urls": [
@@ -82,3 +90,18 @@ vercel
     ]
   }
   ```
+
+### 3. YouTube Scraper
+
+- **Endpoint**: `POST /api/scrape/youtube`
+- **Body**:
+
+  ```json
+  {
+    "urls": [
+      "https://www.youtube.com/shorts/LCIdTSsXFvU",
+      "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    ]
+  }
+  ```
+
