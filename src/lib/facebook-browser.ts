@@ -1,5 +1,5 @@
 import chromium from "@sparticuz/chromium";
-import puppeteer, { type Page, type HTTPRequest } from "puppeteer-core";
+import puppeteer, { TimeoutError, type Page, type HTTPRequest, type HTTPResponse } from "puppeteer-core";
 
 export async function renderFacebookPages(videoId: string) {
   const deadline = Date.now() + 45000;
@@ -52,10 +52,19 @@ export async function renderFacebookPages(videoId: string) {
         : `https://www.facebook.com/reel/${videoId}`;
       if (Date.now() >= deadline) throw new Error("Request time limit reached");
 
-      const response = await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: Math.max(1, Math.min(7000, deadline - Date.now())),
-      });
+      let response: HTTPResponse | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          response = await page.goto(url, {
+            waitUntil: "domcontentloaded",
+            // Reserve time for counters to render after the last navigation attempt.
+            timeout: Math.max(1, Math.min(attempt === 0 ? 20000 : 15000, deadline - Date.now() - 5000)),
+          });
+          break;
+        } catch (err: unknown) {
+          if (!(err instanceof TimeoutError) || attempt === 1 || deadline - Date.now() <= 5000) throw err;
+        }
+      }
       if (!response?.ok()) throw new Error(`Facebook returned HTTP ${response?.status()}`);
       if (!new RegExp(`(?:v=|reels?\\/|videos\\/)${videoId}(?:[/?&#]|$)`).test(page.url())) {
         throw new Error("Facebook redirected away from the requested video");
@@ -65,7 +74,7 @@ export async function renderFacebookPages(videoId: string) {
         (isWatch: unknown) => Boolean(isWatch)
           ? /\d/.test(document.querySelector("._26fq")?.textContent || "")
           : document.documentElement.innerHTML.includes('"share_count_reduced"'),
-        { timeout: Math.max(1, Math.min(2200, deadline - Date.now())) },
+        { timeout: Math.max(1, Math.min(5000, deadline - Date.now())) },
         source === "watch"
       ).catch(() => {});
 

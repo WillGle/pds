@@ -85,6 +85,8 @@ function extractVideoMetrics(html: string, videoId: string, result: FacebookScra
     const record = asRecord(value);
     return parseCount(record ? record.total_count ?? record.count : value);
   };
+  let sourceComments: number | null = null;
+  let sourceShares: number | null = null;
 
   const apply = (record: Record<string, unknown>) => {
     if (source === "watch" && result.views === null) {
@@ -103,10 +105,9 @@ function extractVideoMetrics(html: string, videoId: string, result: FacebookScra
       if (result.views !== null) result.viewsText ||= String(result.views);
     }
     result.likes ??= count(record.reaction_count) ?? count(record.like_count) ?? count(record.likers) ?? count(record.unified_reactors);
-    // Attempt comments and shares from whichever page responds — don't restrict to a single source
-    // so that a bot-check or redirect on one URL doesn't permanently block the other field.
-    result.comments ??= count(record.total_comment_count) ?? count(record.comment_count) ?? count(record.comments_count);
-    result.shares ??= count(record.share_count) ?? count(record.shares_count) ?? parseCount(record.share_count_reduced);
+    // Keep each source's counters separate so fallback values cannot override the preferred page.
+    sourceComments ??= count(record.total_comment_count) ?? count(record.comment_count) ?? count(record.comments_count);
+    sourceShares ??= count(record.share_count) ?? count(record.shares_count) ?? parseCount(record.share_count_reduced);
   };
 
   const applyDate = (record: Record<string, unknown>) => {
@@ -149,6 +150,8 @@ function extractVideoMetrics(html: string, videoId: string, result: FacebookScra
       if (originalFeedbackIds.has(String(record.id))) apply(record);
     }
   }
+  result.comments = source === "watch" ? sourceComments ?? result.comments : result.comments ?? sourceComments;
+  result.shares = source === "reel" ? sourceShares ?? result.shares : result.shares ?? sourceShares;
 }
 
 function metaContent(html: string, name: string): string {

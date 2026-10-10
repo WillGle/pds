@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { formatIsoDate, parseCount, parseFormattedCount } from "@/lib/scrape";
+import { asRecord, formatIsoDate, objects, parseCount } from "@/lib/scrape";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -17,7 +17,7 @@ export interface YouTubeScrapedItem {
   error?: string;
 }
 
-export function extractYouTubeId(url: string): string | null {
+function extractYouTubeId(url: string): string | null {
   if (!url) return null;
   const clean = url.trim();
   const match = clean.match(
@@ -27,9 +27,9 @@ export function extractYouTubeId(url: string): string | null {
 }
 
 function extractBalancedJson(html: string, varName: string): Record<string, unknown> | null {
-  const idx = html.indexOf(varName + " = ");
-  if (idx === -1) return null;
-  const start = html.indexOf("{", idx);
+  const assignment = new RegExp(`\\b${varName}\\s*=\\s*\\{`).exec(html);
+  if (!assignment) return null;
+  const start = html.indexOf("{", assignment.index);
   if (start === -1) return null;
   let depth = 0;
   let end = start;
@@ -55,7 +55,59 @@ function extractBalancedJson(html: string, varName: string): Record<string, unkn
   }
 }
 
-export async function scrapeSingleYouTube(
+function exactCountText(value: unknown): number | null {
+  const text = asRecord(value);
+  const runs = Array.isArray(text?.runs) ? text.runs : [];
+  const label = typeof value === "string" ? value : text?.simpleText ?? text?.content ??
+    runs.map((run) => asRecord(run)?.text || "").join("");
+  if (typeof label !== "string") return null;
+  const match = label.trim().match(/^(\d+(?:,\d{3})*)(?:\s+comments?)?$/i);
+  return match ? parseCount(match[1].replace(/,/g, "")) : null;
+}
+
+function readLikes(data: unknown): number | null {
+  // Prefer the current count; the text for the toggled button can include an extra like.
+  for (const record of objects(data)) {
+    const count = parseCount(asRecord(record.likeCountEntity)?.likeCountIfIndifferentNumber);
+    if (count !== null) return count;
+  }
+  for (const record of objects(data)) {
+    // Exact accessibility text: "like this video along with 19,481,334 other people".
+    const label = record.accessibilityText;
+    const match = typeof label === "string"
+      ? label.match(/^like this video along with ([0-9,]+)\s*other people$/i) : null;
+    const count = match ? exactCountText(match[1]) :
+      record.iconName === "LIKE" ? exactCountText(record.title) : null;
+    if (count !== null) return count;
+  }
+  return null;
+}
+
+function readComments(data: unknown) {
+  let count: number | null = null;
+  let disabled = false;
+  const tokens = new Set<string>();
+  for (const record of objects(data)) {
+    const header = asRecord(record.commentsHeaderRenderer) ??
+      asRecord(record.commentsEntryPointHeaderRenderer) ?? asRecord(record.commentsHeaderViewModel);
+    if (header) {
+      count ??= exactCountText(header.countText ?? header.commentCount ?? header.commentsCount);
+    }
+    const section = asRecord(record.itemSectionRenderer);
+    if (!section || (section.sectionIdentifier !== "comment-item-section" &&
+      section.targetId !== "comments-section" && section.targetId !== "engagement-panel-comments-section")) continue;
+    for (const child of objects(section)) {
+      const token = asRecord(child.continuationCommand)?.token;
+      if (typeof token === "string" && token) tokens.add(token);
+      if (child.commentsDisabled === true || JSON.stringify(child.messageRenderer || "").includes("Comments are turned off")) {
+        disabled = true;
+      }
+    }
+  }
+  return { count, disabled, tokens: [...tokens] };
+}
+
+async function scrapeSingleYouTube(
   rawUrl: string,
   deadline = Date.now() + 25000
 ): Promise<YouTubeScrapedItem> {
@@ -78,15 +130,10 @@ export async function scrapeSingleYouTube(
   result.id = videoId;
   const signal = (ms: number) =>
     AbortSignal.timeout(Math.max(1, Math.min(ms, deadline - Date.now())));
-
-  const clientContext = {
-    client: {
-      clientName: "WEB",
-      clientVersion: "2.20240401.00.00",
-      hl: "en",
-      gl: "US",
-    },
-  };
+  // Leave time for HTML extraction and a comments request if the API attempts fail.
+  const apiDeadline = deadline - 11000;
+  const apiSignal = (ms: number) =>
+    AbortSignal.timeout(Math.max(1, Math.min(ms, apiDeadline - Date.now())));
 
   const headers = {
     "Content-Type": "application/json",
@@ -95,7 +142,6 @@ export async function scrapeSingleYouTube(
     "Accept-Language": "en-US,en;q=0.9",
   };
 
-  let commentContinuationToken: string | null = null;
   let isCommentsDisabled = false;
 
   // Tier 1: YouTube Innertube Player Endpoint
@@ -107,18 +153,19 @@ export async function scrapeSingleYouTube(
   ];
 
   for (const client of innertubeClients) {
-    if (Date.now() >= deadline) break;
+    if (Date.now() >= apiDeadline) break;
     try {
-      const playerResp = await fetch("https://www.youtube.com/youtubei/v1/player", {
+      const playerResp: Response = await fetch("https://www.youtube.com/youtubei/v1/player", {
         method: "POST",
         headers,
         body: JSON.stringify({ context: { client }, videoId }),
-        signal: signal(5000),
+        signal: apiSignal(5000),
         cache: "no-store",
       });
 
       if (playerResp.ok) {
         const playerData = await playerResp.json();
+        if (playerData.videoDetails?.videoId !== videoId) continue;
         if (playerData.videoDetails) {
           result.title ||= playerData.videoDetails.title || "";
           result.author ||= playerData.videoDetails.author || "";
@@ -143,54 +190,85 @@ export async function scrapeSingleYouTube(
     }
   }
 
-  let tokenClient: { clientName: string; clientVersion: string; hl: string; gl: string } | null = null;
   // Tier 1 (continued): YouTube Innertube Next Endpoint for Likes & Comments Token
   // WEB client provides desktop comments tree and exact likes. MWEB is used as fallback.
   const nextClients = [
-    { clientName: "WEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
-    { clientName: "MWEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
+    { clientName: "WEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US", timeZone: "Asia/Ho_Chi_Minh", utcOffsetMinutes: 420 },
+    { clientName: "MWEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US", timeZone: "Asia/Ho_Chi_Minh", utcOffsetMinutes: 420 },
   ];
 
+  const continuations: { token: string; client: typeof nextClients[number] }[] = [];
+  const attemptedTokens = new Set<string>();
+  const applyComments = (data: unknown, client: typeof nextClients[number]) => {
+    const comments = readComments(data);
+    result.comments ??= comments.count;
+    isCommentsDisabled ||= comments.disabled;
+    if (isCommentsDisabled && result.comments === null) result.comments = 0;
+    for (const token of comments.tokens) {
+      if (!continuations.some((entry) => entry.token === token && entry.client.clientName === client.clientName)) {
+        continuations.push({ token, client });
+      }
+    }
+  };
+
+  const fetchComments = async (stageDeadline: number) => {
+    for (const { token, client } of continuations) {
+      const key = `${client.clientName}:${token}`;
+      if (result.comments !== null || isCommentsDisabled || Date.now() >= stageDeadline) break;
+      if (attemptedTokens.has(key)) continue;
+      attemptedTokens.add(key);
+      try {
+        const response = await fetch("https://www.youtube.com/youtubei/v1/next", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ context: { client }, continuation: token }),
+          signal: signal(Math.min(5000, stageDeadline - Date.now())),
+          cache: "no-store",
+        });
+        if (response.ok) applyComments(await response.json(), client);
+      } catch {
+        // Try the other comments section while the request still has time.
+      }
+    }
+  };
+
   for (const client of nextClients) {
-    if (Date.now() >= deadline) break;
+    if (Date.now() >= apiDeadline) break;
     try {
-      const nextResp = await fetch("https://www.youtube.com/youtubei/v1/next", {
+      const nextResp: Response = await fetch("https://www.youtube.com/youtubei/v1/next", {
         method: "POST",
         headers,
         body: JSON.stringify({ context: { client }, videoId }),
-        signal: signal(5000),
+        signal: apiSignal(5000),
         cache: "no-store",
       });
 
       if (nextResp.ok) {
         const nextData = await nextResp.json();
+        const returnedId = nextData.currentVideoEndpoint?.watchEndpoint?.videoId;
+        if (returnedId !== videoId) continue;
         const nextStr = JSON.stringify(nextData);
 
-        // Check if comments disabled
-        if (nextStr.includes("Comments are turned off") || nextStr.includes("commentsDisabled")) {
-          isCommentsDisabled = true;
-          result.comments = 0;
-        }
-
-        // Extract Likes (exact accessibility text: "like this video along with 19,481,334 other people")
-        if (result.likes === null) {
-          const likeAccMatches = [
-            ...nextStr.matchAll(
-              /"accessibilityText":\s*"like this video along with ([0-9,.]+)\s*other people"/gi
-            ),
-          ];
-          if (likeAccMatches.length > 0) {
-            result.likes = parseFormattedCount(likeAccMatches[0][1]);
-          } else {
-            // Fallback like count string
-            const shortLikeMatch = nextStr.match(
-              /"iconName":\s*"LIKE"[^}]*?"title":\s*"([0-9.]+[KMBkmb]?)"/
-            );
-            if (shortLikeMatch) {
-              result.likes = parseFormattedCount(shortLikeMatch[1]);
+        // The player can be blocked on serverless IPs while the watch metadata is available.
+        if (nextData.currentVideoEndpoint?.watchEndpoint?.videoId === videoId) {
+          const contents = nextData.contents?.twoColumnWatchNextResults?.results?.results?.contents || [];
+          for (const item of contents) {
+            const owner = item.videoSecondaryInfoRenderer?.owner?.videoOwnerRenderer;
+            result.author ||= owner?.title?.simpleText || owner?.title?.runs?.[0]?.text || "";
+            const primary = item.videoPrimaryInfoRenderer;
+            if (!primary) continue;
+            result.views ??= parseCount(primary.viewCount?.videoViewCountRenderer?.originalViewCount);
+            const date = primary.dateText?.simpleText;
+            if (!result.postDate && typeof date === "string" && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(date)) {
+              // The client timezone makes this a Vietnam calendar date, without a time component.
+              result.postDate = formatIsoDate(`${date} UTC`);
             }
           }
         }
+
+        applyComments(nextData, client);
+
+        result.likes ??= readLikes(nextData);
 
         if (!result.author) {
           const authorMatch = nextStr.match(
@@ -199,18 +277,8 @@ export async function scrapeSingleYouTube(
           if (authorMatch) result.author = authorMatch[1];
         }
 
-        // Find continuation token for comments-section
-        if (!commentContinuationToken && !isCommentsDisabled) {
-          const tokenMatch = nextStr.match(
-            /"continuationCommand":\s*\{[^}]*?"token":\s*"([^"]+)"/
-          );
-          if (tokenMatch) {
-            commentContinuationToken = tokenMatch[1];
-            tokenClient = client;
-          }
-        }
-
-        if (result.likes !== null && commentContinuationToken) {
+        if (result.views !== null && result.postDate && result.author && result.likes !== null &&
+          (result.comments !== null || continuations.length > 0)) {
           break;
         }
       }
@@ -219,44 +287,10 @@ export async function scrapeSingleYouTube(
     }
   }
 
-  // Fetch comments via continuation token if available
-  if (commentContinuationToken && !isCommentsDisabled && result.comments === null && Date.now() < deadline) {
-    try {
-      const commResp = await fetch("https://www.youtube.com/youtubei/v1/next", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          context: { client: tokenClient || { clientName: "WEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" } },
-          continuation: commentContinuationToken,
-        }),
-        signal: signal(5000),
-        cache: "no-store",
-      });
+  await fetchComments(apiDeadline);
 
-      if (commResp.ok) {
-        const commData = await commResp.json();
-        const commStr = JSON.stringify(commData);
-        const countMatch = commStr.match(
-          /"countText":\s*\{\s*"runs":\s*\[\s*\{\s*"text":\s*"([0-9,.]+)"\s*\}/
-        );
-        if (countMatch) {
-          result.comments = parseFormattedCount(countMatch[1]);
-        } else {
-          const shortCountMatch = commStr.match(
-            /"commentsCount":\s*\{\s*"runs":\s*\[\s*\{\s*"text":\s*"([0-9.]+[KMBkmb]?)"\s*\}/
-          );
-          if (shortCountMatch) {
-            result.comments = parseFormattedCount(shortCountMatch[1]);
-          }
-        }
-      }
-    } catch {
-      // Continue
-    }
-  }
-
-  // Tier 2: In-source HTML fallback if views or likes are still missing
-  if ((result.views === null || result.likes === null || !result.author || !result.postDate) && Date.now() < deadline) {
+  // Tier 2: In-source HTML fallback for any missing public metric.
+  if ((result.views === null || result.likes === null || result.comments === null || !result.author || !result.postDate) && Date.now() < deadline) {
     try {
       const htmlResp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
         headers: {
@@ -274,7 +308,7 @@ export async function scrapeSingleYouTube(
         const playerObj = extractBalancedJson(html, "ytInitialPlayerResponse");
         if (playerObj) {
           const details = playerObj.videoDetails as Record<string, unknown> | undefined;
-          if (details) {
+          if (details && details.videoId === videoId) {
             result.title ||= String(details.title || "");
             result.author ||= String(details.author || "");
             if (result.views === null && details.viewCount) {
@@ -283,29 +317,25 @@ export async function scrapeSingleYouTube(
           }
           const microformat = (playerObj.microformat as Record<string, unknown> | undefined)
             ?.playerMicroformatRenderer as Record<string, unknown> | undefined;
-          if (!result.postDate && microformat) {
+          if (details?.videoId === videoId && !result.postDate && microformat) {
             const raw = microformat.publishDate || microformat.uploadDate;
             if (raw) result.postDate = formatIsoDate(String(raw));
           }
         }
 
         const initialObj = extractBalancedJson(html, "ytInitialData");
-        if (initialObj && result.likes === null) {
-          const initStr = JSON.stringify(initialObj);
-          const likeAccMatches = [
-            ...initStr.matchAll(
-              /"accessibilityText":\s*"like this video along with ([0-9,.]+)\s*other people"/gi
-            ),
-          ];
-          if (likeAccMatches.length > 0) {
-            result.likes = parseFormattedCount(likeAccMatches[0][1]);
-          }
+        const initialId = asRecord(asRecord(initialObj?.currentVideoEndpoint)?.watchEndpoint)?.videoId;
+        if (initialObj && initialId === videoId) {
+          applyComments(initialObj, nextClients[0]);
+          result.likes ??= readLikes(initialObj);
         }
       }
     } catch {
       // Continue
     }
   }
+
+  await fetchComments(deadline);
 
   // Tier 3: Official oEmbed fallback for author & title
   if ((!result.author || !result.title) && Date.now() < deadline) {
@@ -324,16 +354,10 @@ export async function scrapeSingleYouTube(
     }
   }
 
-  // If comments are still unresolved, but the video details and likes were found,
-  // default comments to 0 so the item is complete.
-  if (result.comments === null && (result.views !== null || result.likes !== null)) {
-    result.comments = 0;
-  }
-
-  const requiredFields = ["views", "likes", "postDate"] as const;
+  const requiredFields = ["views", "likes", "comments", "postDate", "author"] as const;
   const missing = requiredFields.filter((f) => result[f] === null);
   if (!result.author) {
-    missing.push("author" as unknown as typeof requiredFields[number]);
+    missing.push("author");
   }
 
   if (missing.length > 0 && !result.error) {
@@ -374,27 +398,31 @@ export async function POST(req: NextRequest) {
     }
 
     const deadline = Date.now() + 25000;
-    const results: YouTubeScrapedItem[] = [];
+    // Run up to 3 URLs concurrently — each is a pure HTTP scrape, no shared state.
+    const concurrency = Math.min(3, cleanUrls.length);
+    const results: YouTubeScrapedItem[] = new Array(cleanUrls.length);
+    let nextIdx = 0;
 
-    for (let i = 0; i < cleanUrls.length; i++) {
-      const item =
-        Date.now() < deadline
-          ? await scrapeSingleYouTube(cleanUrls[i], deadline)
-          : {
-              url: cleanUrls[i],
-              views: null,
-              likes: null,
-              comments: null,
-              shares: null,
-              author: "",
-              postDate: null,
-              error: "Request time limit reached; retry this URL individually",
-            };
-      results.push(item);
-      if (i < cleanUrls.length - 1 && deadline - Date.now() > 500) {
-        await new Promise((resolve) => setTimeout(resolve, 300));
+    const worker = async () => {
+      while (nextIdx < cleanUrls.length) {
+        const i = nextIdx++;
+        results[i] =
+          Date.now() < deadline
+            ? await scrapeSingleYouTube(cleanUrls[i], deadline)
+            : {
+                url: cleanUrls[i],
+                views: null,
+                likes: null,
+                comments: null,
+                shares: null,
+                author: "",
+                postDate: null,
+                error: "Request time limit reached; retry this URL individually",
+              };
       }
-    }
+    };
+
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
     return NextResponse.json({
       success: results.every((item) => !item.error),
