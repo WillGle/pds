@@ -228,7 +228,7 @@ export default function Home() {
                 postDate: null,
                 error: message,
               })),
-              !retryUrls
+              !!retryUrls
             )
           );
         }
@@ -292,7 +292,7 @@ export default function Home() {
                     error: d.error,
                   },
                 ],
-                !retryUrls
+                !!retryUrls
               )
             );
           } else {
@@ -312,7 +312,7 @@ export default function Home() {
                     error: resJson.error || "Extraction failed",
                   },
                 ],
-                !retryUrls
+                !!retryUrls
               )
             );
           }
@@ -334,7 +334,7 @@ export default function Home() {
                   error: msg,
                 },
               ],
-              !retryUrls
+              !!retryUrls
             )
           );
         }
@@ -422,7 +422,7 @@ export default function Home() {
                     error: d.error,
                   },
                 ],
-                !retryUrls
+                !!retryUrls
               )
             );
           } else {
@@ -441,7 +441,7 @@ export default function Home() {
                     error: resJson.error || "Extraction failed",
                   },
                 ],
-                !retryUrls
+                !!retryUrls
               )
             );
           }
@@ -462,7 +462,7 @@ export default function Home() {
                   error: msg,
                 },
               ],
-              !retryUrls
+              !!retryUrls
             )
           );
         }
