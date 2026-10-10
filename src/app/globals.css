@@ -334,6 +334,11 @@ body {
   border-color: #475569;
 }
 
+.btn-secondary:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .btn-primary.fb {
   background: #2563eb;
   border-color: #1d4ed8;

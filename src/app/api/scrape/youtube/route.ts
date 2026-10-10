@@ -144,51 +144,60 @@ async function scrapeSingleYouTube(
 
   let isCommentsDisabled = false;
 
-  // Tier 1: YouTube Innertube Player Endpoint
-  // On datacenter IPs (like Vercel / AWS), MWEB client successfully bypasses bot verification / PO-token challenges.
-  // We try MWEB first, then WEB client.
-  const innertubeClients = [
-    { clientName: "MWEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
-    { clientName: "WEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
-  ];
+  // Load player and watch metadata concurrently, preserving player field precedence.
+  const playerPromise = (async () => {
+    const result: YouTubeScrapedItem = {
+      url: rawUrl, id: videoId, author: "", views: null, likes: null,
+      comments: null, shares: null, postDate: null,
+    };
+    // Tier 1: YouTube Innertube Player Endpoint
+    // On datacenter IPs (like Vercel / AWS), MWEB client successfully bypasses bot verification / PO-token challenges.
+    // We try MWEB first, then WEB client.
+    const innertubeClients = [
+      { clientName: "MWEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
+      { clientName: "WEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
+    ];
 
-  for (const client of innertubeClients) {
-    if (Date.now() >= apiDeadline) break;
-    try {
-      const playerResp: Response = await fetch("https://www.youtube.com/youtubei/v1/player", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ context: { client }, videoId }),
-        signal: apiSignal(5000),
-        cache: "no-store",
-      });
+    for (const client of innertubeClients) {
+      if (Date.now() >= apiDeadline) break;
+      try {
+        const playerResp: Response = await fetch("https://www.youtube.com/youtubei/v1/player", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ context: { client }, videoId }),
+          signal: apiSignal(5000),
+          cache: "no-store",
+        });
 
-      if (playerResp.ok) {
-        const playerData = await playerResp.json();
-        if (playerData.videoDetails?.videoId !== videoId) continue;
-        if (playerData.videoDetails) {
-          result.title ||= playerData.videoDetails.title || "";
-          result.author ||= playerData.videoDetails.author || "";
-          if (playerData.videoDetails.viewCount && result.views === null) {
-            result.views = parseCount(playerData.videoDetails.viewCount);
+        if (playerResp.ok) {
+          const playerData = await playerResp.json();
+          if (playerData.videoDetails?.videoId !== videoId) continue;
+          if (playerData.videoDetails) {
+            result.title ||= playerData.videoDetails.title || "";
+            result.author ||= playerData.videoDetails.author || "";
+            if (playerData.videoDetails.viewCount && result.views === null) {
+              result.views = parseCount(playerData.videoDetails.viewCount);
+            }
+          }
+
+          const rawDate =
+            playerData.microformat?.playerMicroformatRenderer?.publishDate ||
+            playerData.microformat?.playerMicroformatRenderer?.uploadDate;
+          if (rawDate && !result.postDate) {
+            result.postDate = formatIsoDate(rawDate);
+          }
+
+          if (result.views !== null && result.author && result.postDate) {
+            break;
           }
         }
-
-        const rawDate =
-          playerData.microformat?.playerMicroformatRenderer?.publishDate ||
-          playerData.microformat?.playerMicroformatRenderer?.uploadDate;
-        if (rawDate && !result.postDate) {
-          result.postDate = formatIsoDate(rawDate);
-        }
-
-        if (result.views !== null && result.author && result.postDate) {
-          break;
-        }
+      } catch {
+        // Continue to next client
       }
-    } catch {
-      // Continue to next client
     }
-  }
+
+    return result;
+  })();
 
   // Tier 1 (continued): YouTube Innertube Next Endpoint for Likes & Comments Token
   // WEB client provides desktop comments tree and exact likes. MWEB is used as fallback.
@@ -286,6 +295,12 @@ async function scrapeSingleYouTube(
       // Continue
     }
   }
+
+  const playerResult = await playerPromise;
+  result.title = playerResult.title || result.title;
+  result.author = playerResult.author || result.author;
+  result.views = playerResult.views ?? result.views;
+  result.postDate = playerResult.postDate || result.postDate;
 
   await fetchComments(apiDeadline);
 

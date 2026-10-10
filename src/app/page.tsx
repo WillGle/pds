@@ -1,7 +1,6 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import * as XLSX from "xlsx";
 
 interface FacebookItem {
   url: string;
@@ -224,7 +223,7 @@ function ResultsTable({
 }) {
   const showShares = platform !== "youtube";
   const showSaves = platform === "tiktok";
-  const totalCols = 7 + (showShares ? 1 : 0) + (showSaves ? 1 : 0);
+  const totalCols = 8 + (showShares ? 1 : 0) + (showSaves ? 1 : 0);
 
   return (
     <table className="custom-table">
@@ -971,7 +970,7 @@ export default function Home() {
     setTimeout(() => setCopiedType(null), 2000);
   };
 
-  const exportToExcel = () => {
+  const exportToExcel = async () => {
     if (!canExport) return;
     const isFb = activeTab === "facebook";
     const isTt = activeTab === "tiktok";
@@ -1007,13 +1006,14 @@ export default function Home() {
         }));
 
     const sheetName = isFb ? "Facebook" : isTt ? "TikTok" : "YouTube";
+    const XLSX = await import("xlsx");
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
     XLSX.writeFile(workbook, `${sheetName.toLowerCase()}_data.xlsx`);
   };
 
-  const exportToCsv = () => {
+  const exportToCsv = async () => {
     if (!canExport) return;
     const isFb = activeTab === "facebook";
     const isTt = activeTab === "tiktok";
@@ -1049,6 +1049,7 @@ export default function Home() {
         }));
 
     const sheetName = isFb ? "Facebook" : isTt ? "TikTok" : "YouTube";
+    const XLSX = await import("xlsx");
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
     const csvOutput = XLSX.utils.sheet_to_csv(worksheet);
     const blob = new Blob(["\uFEFF" + csvOutput], { type: "text/csv;charset=utf-8;" });
