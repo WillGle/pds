@@ -61,8 +61,18 @@ function exactCountText(value: unknown): number | null {
   const label = typeof value === "string" ? value : text?.simpleText ?? text?.content ??
     runs.map((run) => asRecord(run)?.text || "").join("");
   if (typeof label !== "string") return null;
-  const match = label.trim().match(/^(\d+(?:,\d{3})*)(?:\s+comments?)?$/i);
+  const match = label.trim().match(/^(\d+(?:,\d{3})*)(?:\s+(?:comments?|views?))?$/i);
   return match ? parseCount(match[1].replace(/,/g, "")) : null;
+}
+
+function readViews(value: unknown): number | null {
+  const renderer = asRecord(value);
+  const original = parseCount(renderer?.originalViewCount);
+  if (original !== null && original > 0) return original;
+  // YouTube can send originalViewCount="0" alongside a nonzero visible counter.
+  const visible = exactCountText(renderer?.viewCount);
+  if (visible !== null) return visible;
+  return asRecord(renderer?.viewCount)?.simpleText === "No views" ? 0 : null;
 }
 
 function readLikes(data: unknown): number | null {
@@ -176,7 +186,8 @@ async function scrapeSingleYouTube(
             result.title ||= playerData.videoDetails.title || "";
             result.author ||= playerData.videoDetails.author || "";
             if (playerData.videoDetails.viewCount && result.views === null) {
-              result.views = parseCount(playerData.videoDetails.viewCount);
+              const views = parseCount(playerData.videoDetails.viewCount);
+              if (views !== 0 || playerData.playabilityStatus?.status === "OK") result.views = views;
             }
           }
 
@@ -266,7 +277,7 @@ async function scrapeSingleYouTube(
             result.author ||= owner?.title?.simpleText || owner?.title?.runs?.[0]?.text || "";
             const primary = item.videoPrimaryInfoRenderer;
             if (!primary) continue;
-            result.views ??= parseCount(primary.viewCount?.videoViewCountRenderer?.originalViewCount);
+            result.views ??= readViews(primary.viewCount?.videoViewCountRenderer);
             const date = primary.dateText?.simpleText;
             if (!result.postDate && typeof date === "string" && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(date)) {
               // The client timezone makes this a Vietnam calendar date, without a time component.
@@ -299,7 +310,9 @@ async function scrapeSingleYouTube(
   const playerResult = await playerPromise;
   result.title = playerResult.title || result.title;
   result.author = playerResult.author || result.author;
-  result.views = playerResult.views ?? result.views;
+  if (playerResult.views !== null && (playerResult.views > 0 || result.views === null)) {
+    result.views = playerResult.views;
+  }
   result.postDate = playerResult.postDate || result.postDate;
 
   await fetchComments(apiDeadline);
@@ -327,7 +340,8 @@ async function scrapeSingleYouTube(
             result.title ||= String(details.title || "");
             result.author ||= String(details.author || "");
             if (result.views === null && details.viewCount) {
-              result.views = parseCount(details.viewCount);
+              const views = parseCount(details.viewCount);
+              if (views !== 0 || asRecord(playerObj.playabilityStatus)?.status === "OK") result.views = views;
             }
           }
           const microformat = (playerObj.microformat as Record<string, unknown> | undefined)
@@ -341,6 +355,14 @@ async function scrapeSingleYouTube(
         const initialObj = extractBalancedJson(html, "ytInitialData");
         const initialId = asRecord(asRecord(initialObj?.currentVideoEndpoint)?.watchEndpoint)?.videoId;
         if (initialObj && initialId === videoId) {
+          const watch = asRecord(asRecord(initialObj.contents)?.twoColumnWatchNextResults);
+          const contents = asRecord(asRecord(watch?.results)?.results)?.contents;
+          if (Array.isArray(contents)) {
+            for (const item of contents) {
+              const primary = asRecord(asRecord(item)?.videoPrimaryInfoRenderer);
+              result.views ??= readViews(asRecord(primary?.viewCount)?.videoViewCountRenderer);
+            }
+          }
           applyComments(initialObj, nextClients[0]);
           result.likes ??= readLikes(initialObj);
         }
