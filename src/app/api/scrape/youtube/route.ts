@@ -71,8 +71,31 @@ function readViews(value: unknown): number | null {
   if (original !== null && original > 0) return original;
   // YouTube can send originalViewCount="0" alongside a nonzero visible counter.
   const visible = exactCountText(renderer?.viewCount);
-  if (visible !== null) return visible;
-  return asRecord(renderer?.viewCount)?.simpleText === "No views" ? 0 : null;
+  return visible !== null && visible > 0 ? visible : null;
+}
+
+function readDescriptionViews(data: unknown): number | null {
+  let zero: number | null = null;
+  // The description panel contains the full counter shown by Shorts' description menu.
+  for (const panel of objects(asRecord(data)?.engagementPanels)) {
+    const description = asRecord(panel.structuredDescriptionContentRenderer);
+    if (!Array.isArray(description?.items)) continue;
+    for (const item of description.items) {
+      const header = asRecord(asRecord(item)?.videoDescriptionHeaderRenderer);
+      if (!header) continue;
+      const counts = [exactCountText(header.views)];
+      for (const factoid of Array.isArray(header.factoid) ? header.factoid : []) {
+        const view = asRecord(asRecord(factoid)?.viewCountFactoidRenderer);
+        const renderer = asRecord(asRecord(view?.factoid)?.factoidRenderer);
+        counts.push(exactCountText(renderer?.accessibilityText), exactCountText(renderer?.value));
+      }
+      for (const count of counts) {
+        if (count !== null && count > 0) return count;
+        if (count === 0) zero = 0;
+      }
+    }
+  }
+  return zero;
 }
 
 function readLikes(data: unknown): number | null {
@@ -187,7 +210,7 @@ async function scrapeSingleYouTube(
             result.author ||= playerData.videoDetails.author || "";
             if (playerData.videoDetails.viewCount && result.views === null) {
               const views = parseCount(playerData.videoDetails.viewCount);
-              if (views !== 0 || playerData.playabilityStatus?.status === "OK") result.views = views;
+              if (views !== null && views > 0) result.views = views;
             }
           }
 
@@ -268,6 +291,10 @@ async function scrapeSingleYouTube(
         const returnedId = nextData.currentVideoEndpoint?.watchEndpoint?.videoId;
         if (returnedId !== videoId) continue;
         const nextStr = JSON.stringify(nextData);
+        const descriptionViews = readDescriptionViews(nextData);
+        if (descriptionViews !== null && (descriptionViews > 0 || result.views === null)) {
+          result.views = descriptionViews;
+        }
 
         // The player can be blocked on serverless IPs while the watch metadata is available.
         if (nextData.currentVideoEndpoint?.watchEndpoint?.videoId === videoId) {
@@ -277,7 +304,8 @@ async function scrapeSingleYouTube(
             result.author ||= owner?.title?.simpleText || owner?.title?.runs?.[0]?.text || "";
             const primary = item.videoPrimaryInfoRenderer;
             if (!primary) continue;
-            result.views ??= readViews(primary.viewCount?.videoViewCountRenderer);
+            const primaryViews = readViews(primary.viewCount?.videoViewCountRenderer);
+            if (result.views === null || result.views === 0) result.views = primaryViews ?? result.views;
             const date = primary.dateText?.simpleText;
             if (!result.postDate && typeof date === "string" && /^[A-Z][a-z]{2} \d{1,2}, \d{4}$/.test(date)) {
               // The client timezone makes this a Vietnam calendar date, without a time component.
@@ -341,7 +369,7 @@ async function scrapeSingleYouTube(
             result.author ||= String(details.author || "");
             if (result.views === null && details.viewCount) {
               const views = parseCount(details.viewCount);
-              if (views !== 0 || asRecord(playerObj.playabilityStatus)?.status === "OK") result.views = views;
+              if (views !== null && views > 0) result.views = views;
             }
           }
           const microformat = (playerObj.microformat as Record<string, unknown> | undefined)
@@ -355,12 +383,17 @@ async function scrapeSingleYouTube(
         const initialObj = extractBalancedJson(html, "ytInitialData");
         const initialId = asRecord(asRecord(initialObj?.currentVideoEndpoint)?.watchEndpoint)?.videoId;
         if (initialObj && initialId === videoId) {
+          const descriptionViews = readDescriptionViews(initialObj);
+          if (descriptionViews !== null && (descriptionViews > 0 || result.views === null)) {
+            result.views = descriptionViews;
+          }
           const watch = asRecord(asRecord(initialObj.contents)?.twoColumnWatchNextResults);
           const contents = asRecord(asRecord(watch?.results)?.results)?.contents;
           if (Array.isArray(contents)) {
             for (const item of contents) {
               const primary = asRecord(asRecord(item)?.videoPrimaryInfoRenderer);
-              result.views ??= readViews(asRecord(primary?.viewCount)?.videoViewCountRenderer);
+              const primaryViews = readViews(asRecord(primary?.viewCount)?.videoViewCountRenderer);
+              if (result.views === null || result.views === 0) result.views = primaryViews ?? result.views;
             }
           }
           applyComments(initialObj, nextClients[0]);

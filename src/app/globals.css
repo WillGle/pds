@@ -189,6 +189,13 @@ body {
   box-shadow: 0 0 16px rgba(239, 68, 68, 0.25);
 }
 
+.tab-btn.active.ig {
+  background: #4a1942;
+  border-color: #d946ef;
+  color: #ffffff;
+  box-shadow: 0 0 16px rgba(217, 70, 239, 0.25);
+}
+
 .section-header-row {
   display: flex;
   justify-content: space-between;
@@ -226,6 +233,12 @@ body {
   background: rgba(239, 68, 68, 0.15);
   border: 1px solid rgba(239, 68, 68, 0.35);
   color: #f87171;
+}
+
+.platform-pill.ig {
+  background: rgba(217, 70, 239, 0.15);
+  border: 1px solid rgba(217, 70, 239, 0.35);
+  color: #e879f9;
 }
 
 /* Clean Panels */
@@ -363,6 +376,14 @@ body {
   background: #b91c1c;
 }
 
+.btn-primary.ig {
+  background: #a21caf;
+  border-color: #86198f;
+}
+.btn-primary.ig:hover:not(:disabled) {
+  background: #86198f;
+}
+
 .btn-stop {
   display: inline-flex;
   align-items: center;
@@ -448,6 +469,10 @@ body {
 
 .progress-bar.yt {
   background: linear-gradient(90deg, #dc2626, #f87171);
+}
+
+.progress-bar.ig {
+  background: linear-gradient(90deg, #a21caf, #e879f9);
 }
 
 /* Metric KPI Banner */

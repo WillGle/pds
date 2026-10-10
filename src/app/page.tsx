@@ -38,6 +38,24 @@ interface YouTubeItem {
   error?: string;
 }
 
+interface InstagramItem {
+  platform: "instagram";
+  url: string;
+  views: number | null;
+  likes: number | null;
+  comments: number | null;
+  shares: number | null;
+  saves: number | null;
+  author: string;
+  postDate: string | null;
+  error?: string;
+}
+
+const SAMPLE_IG_URLS = [
+  "https://www.instagram.com/reel/Db6KNE0Klr5/",
+  "https://www.instagram.com/reel/Dbz1yuoi2QL/",
+].join("\n");
+
 const SAMPLE_FB_URLS = [
   "https://www.facebook.com/reel/1075481022014849",
   "https://www.facebook.com/reel/1085809004361213",
@@ -90,7 +108,7 @@ function formatShortLink(url: string): string {
   return videoId ? `${base}?v=${videoId}` : base;
 }
 
-function hasCompleteMetrics(item: FacebookItem | TikTokItem | YouTubeItem): boolean {
+function hasCompleteMetrics(item: ScrapedItem): boolean {
   if (item.error || !item.postDate || !/^\d{4}-\d{2}-\d{2}$/.test(item.postDate)) {
     return false;
   }
@@ -108,11 +126,12 @@ function hasCompleteMetrics(item: FacebookItem | TikTokItem | YouTubeItem): bool
   if (item.comments === null || !Number.isSafeInteger(item.comments) || item.comments < 0) {
     return false;
   }
-  if ("saves" in item && (item.saves === null || !Number.isSafeInteger(item.saves) || item.saves < 0)) {
+  const isInstagram = "platform" in item && item.platform === "instagram";
+  if (!isInstagram && "saves" in item && (item.saves === null || !Number.isSafeInteger(item.saves) || item.saves < 0)) {
     return false;
   }
   // Facebook (has viewsText) and TikTok (has saves) expose public share counts; YouTube does not.
-  const sharesRequired = "saves" in item /* TikTok */ || "viewsText" in item /* Facebook */;
+  const sharesRequired = (!isInstagram && "saves" in item) /* TikTok */ || "viewsText" in item /* Facebook */;
   if ("shares" in item && sharesRequired) {
     if (item.shares === null || !Number.isSafeInteger(item.shares) || item.shares < 0) {
       return false;
@@ -135,8 +154,8 @@ function mergeRows<T extends { url: string }>(previous: T[], incoming: T[], retr
   return [...merged, ...appended];
 }
 
-type PlatformKey = "facebook" | "tiktok" | "youtube";
-type ScrapedItem = FacebookItem | TikTokItem | YouTubeItem;
+type PlatformKey = "facebook" | "tiktok" | "youtube" | "instagram";
+type ScrapedItem = FacebookItem | TikTokItem | YouTubeItem | InstagramItem;
 
 const PLATFORMS = {
   facebook: {
@@ -162,6 +181,19 @@ const PLATFORMS = {
     startBtnId: "tt-start-btn",
     stopBtnId: "tt-stop-btn",
     placeholder: "https://www.tiktok.com/@user/video/1234567890",
+    showShares: true,
+    showSaves: true,
+  },
+  instagram: {
+    key: "instagram" as const,
+    name: "Instagram",
+    tabLabel: "Instagram Reels / Videos",
+    icon: "📷",
+    badgeClass: "ig" as const,
+    textareaId: "ig-url-input",
+    startBtnId: "ig-start-btn",
+    stopBtnId: "ig-stop-btn",
+    placeholder: "https://www.instagram.com/reel/Db6KNE0Klr5/",
     showShares: true,
     showSaves: true,
   },
@@ -202,7 +234,9 @@ function getStatusInfo(item: ScrapedItem): {
     }
     return {
       type: "complete",
-      label: "Complete",
+      label: "platform" in item && item.platform === "instagram" ? "Complete (public metrics)" : "Complete",
+      tooltip: "platform" in item && item.platform === "instagram"
+        ? "Views, likes, comments and date are available. Shares and saves may not be public." : undefined,
     };
   }
   return {
@@ -221,8 +255,8 @@ function ResultsTable({
   items: ScrapedItem[];
   searchQuery: string;
 }) {
-  const showShares = platform !== "youtube";
-  const showSaves = platform === "tiktok";
+  const showShares = PLATFORMS[platform].showShares;
+  const showSaves = PLATFORMS[platform].showSaves;
   const totalCols = 8 + (showShares ? 1 : 0) + (showSaves ? 1 : 0);
 
   return (
@@ -361,6 +395,14 @@ export default function Home() {
   const [ytProgress, setYtProgress] = useState<{ current: number; total: number } | null>(null);
   const abortYtRef = useRef<boolean>(false);
 
+  // Instagram state
+  const [igInput, setIgInput] = useState(SAMPLE_IG_URLS);
+  const [igResults, setIgResults] = useState<InstagramItem[]>([]);
+  const [igLoading, setIgLoading] = useState(false);
+  const [igElapsed, setIgElapsed] = useState<number | null>(null);
+  const [igProgress, setIgProgress] = useState<{ current: number; total: number } | null>(null);
+  const abortIgRef = useRef<boolean>(false);
+
   // Search filter
   const [searchQuery, setSearchQuery] = useState("");
   const [copiedType, setCopiedType] = useState<string | null>(null);
@@ -369,6 +411,12 @@ export default function Home() {
   const [fbTimer, setFbTimer] = useState(0);
   const [ttTimer, setTtTimer] = useState(0);
   const [ytTimer, setYtTimer] = useState(0);
+  const [igTimer, setIgTimer] = useState(0);
+  useEffect(() => {
+    if (!igLoading) return;
+    const interval = setInterval(() => setIgTimer((p) => +(p + 0.1).toFixed(1)), 100);
+    return () => clearInterval(interval);
+  }, [igLoading]);
   useEffect(() => {
     if (!fbLoading) return;
     const interval = setInterval(() => setFbTimer((p) => +(p + 0.1).toFixed(1)), 100);
@@ -753,8 +801,59 @@ export default function Home() {
     }
   };
 
+  const handleScrapeInstagram = async (retryUrls?: string[]) => {
+    const urls = retryUrls ?? Array.from(new Set(igInput.split("\n").map((url) => url.trim()).filter(Boolean)));
+    if (!urls.length) return;
+    const incomplete = (url: string, error: string): InstagramItem => ({
+      platform: "instagram", url, author: "—", postDate: null,
+      views: null, likes: null, comments: null, shares: null, saves: null, error,
+    });
+    abortIgRef.current = false;
+    setIgLoading(true);
+    setIgTimer(0);
+    setIgElapsed(null);
+    setIgProgress({ current: 0, total: urls.length });
+    if (!retryUrls) setIgResults([]);
+    const start = performance.now();
+    try {
+      for (let i = 0; i < urls.length && !abortIgRef.current; i++) {
+        const url = urls[i];
+        let item: InstagramItem;
+        try {
+          const response = await fetch("/api/scrape/instagram", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url }),
+          });
+          const body = await response.json();
+          if (!response.ok || !body.data) throw new Error(body.error || "Instagram extraction failed");
+          const data = body.data;
+          if (data.url !== url) throw new Error("Instagram returned a different URL");
+          item = {
+            platform: "instagram", url, author: data.author || "—", postDate: data.postDate ?? null,
+            views: data.views ?? null, likes: data.likes ?? null, comments: data.comments ?? null,
+            shares: data.shares ?? null, saves: data.saves ?? null, error: data.error,
+          };
+        } catch (error) {
+          item = incomplete(url, error instanceof Error ? error.message : "Instagram request failed");
+        }
+        setIgResults((previous) => mergeRows(previous, [item], !!retryUrls));
+        setIgProgress({ current: i + 1, total: urls.length });
+      }
+    } finally {
+      if (!retryUrls) {
+        setIgResults((previous) => {
+          const returned = new Map(previous.map((item) => [item.url, item]));
+          return urls.map((url) => returned.get(url) || incomplete(url, "Not processed; retry this URL"));
+        });
+      }
+      setIgLoading(false);
+      setIgProgress(null);
+      setIgElapsed(+((performance.now() - start) / 1000).toFixed(2));
+    }
+  };
+
   const handleClear = () => {
-    if (fbLoading || ttLoading || ytLoading) return;
+    if (fbLoading || ttLoading || ytLoading || igLoading) return;
     if (activeTab === "facebook") {
       setFbInput("");
       setFbResults([]);
@@ -765,6 +864,11 @@ export default function Home() {
       setTtResults([]);
       setTtElapsed(null);
       setTtProgress(null);
+    } else if (activeTab === "instagram") {
+      setIgInput("");
+      setIgResults([]);
+      setIgElapsed(null);
+      setIgProgress(null);
     } else {
       setYtInput("");
       setYtResults([]);
@@ -802,6 +906,17 @@ export default function Home() {
     );
   }, [ytResults, searchQuery]);
 
+  const filteredIg = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    return query ? igResults.filter((item) => item.author.toLowerCase().includes(query) || item.url.toLowerCase().includes(query)) : igResults;
+  }, [igResults, searchQuery]);
+
+  const igStats = useMemo(() => ({
+    total: igResults.length,
+    totalViews: igResults.reduce((sum, item) => sum + (item.views || 0), 0),
+    totalLikes: igResults.reduce((sum, item) => sum + (item.likes || 0), 0),
+  }), [igResults]);
+
   // Aggregate stats
   const fbStats = useMemo(() => {
     const total = fbResults.length;
@@ -825,8 +940,8 @@ export default function Home() {
   }, [ytResults]);
 
   const activeResults =
-    activeTab === "facebook" ? fbResults : activeTab === "tiktok" ? ttResults : ytResults;
-  const isLoading = fbLoading || ttLoading || ytLoading;
+    activeTab === "facebook" ? fbResults : activeTab === "tiktok" ? ttResults : activeTab === "instagram" ? igResults : ytResults;
+  const isLoading = fbLoading || ttLoading || ytLoading || igLoading;
   const incompleteCount = activeResults.filter((item) => !hasCompleteMetrics(item)).length;
   const canExport = activeResults.length > 0 && incompleteCount === 0 && !isLoading;
 
@@ -862,10 +977,11 @@ export default function Home() {
     if (!canExport) return;
     const isFb = activeTab === "facebook";
     const isTt = activeTab === "tiktok";
+    const isIg = activeTab === "instagram";
 
     const headers = isFb
       ? ["Author", "Link", "Post Date", "Views", "Likes", "Comments", "Shares"]
-      : isTt
+      : isTt || isIg
       ? ["Author", "Link", "Post Date", "Views", "Likes", "Comments", "Shares", "Saves"]
       : ["Author", "Link", "Post Date", "Views", "Likes", "Comments"];
 
@@ -877,8 +993,8 @@ export default function Home() {
           postDate: item.postDate || "",
           nums: [facebookViews(item), item.likes ?? "", item.comments ?? "", item.shares ?? ""],
         }))
-      : isTt
-      ? filteredTt.map((item) => ({
+      : isTt || isIg
+      ? (isIg ? filteredIg : filteredTt).map((item) => ({
           author: item.author || "—",
           linkUrl: item.url,
           linkText: formatShortLink(item.url),
@@ -939,8 +1055,8 @@ export default function Home() {
             item.comments ?? "",
             item.shares ?? "",
           ])
-        : activeTab === "tiktok"
-        ? filteredTt.map((item) => [
+        : activeTab === "tiktok" || activeTab === "instagram"
+        ? (activeTab === "instagram" ? filteredIg : filteredTt).map((item) => [
             item.views ?? "",
             item.likes ?? "",
             item.comments ?? "",
@@ -974,6 +1090,7 @@ export default function Home() {
     if (!canExport) return;
     const isFb = activeTab === "facebook";
     const isTt = activeTab === "tiktok";
+    const isIg = activeTab === "instagram";
 
     const dataToExport = isFb
       ? fbResults.map((r) => ({
@@ -985,8 +1102,8 @@ export default function Home() {
           Comments: r.comments ?? "",
           Shares: r.shares ?? "",
         }))
-      : isTt
-      ? ttResults.map((r) => ({
+      : isTt || isIg
+      ? (isIg ? igResults : ttResults).map((r) => ({
           Author: r.author || "",
           Link: r.url,
           "Post Date": r.postDate || "",
@@ -1005,7 +1122,7 @@ export default function Home() {
           Comments: r.comments ?? "",
         }));
 
-    const sheetName = isFb ? "Facebook" : isTt ? "TikTok" : "YouTube";
+    const sheetName = isFb ? "Facebook" : isTt ? "TikTok" : isIg ? "Instagram" : "YouTube";
     const XLSX = await import("xlsx");
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
     const workbook = XLSX.utils.book_new();
@@ -1017,6 +1134,7 @@ export default function Home() {
     if (!canExport) return;
     const isFb = activeTab === "facebook";
     const isTt = activeTab === "tiktok";
+    const isIg = activeTab === "instagram";
 
     const dataToExport = isFb
       ? fbResults.map((r) => ({
@@ -1028,8 +1146,8 @@ export default function Home() {
           Comments: r.comments ?? "",
           Shares: r.shares ?? "",
         }))
-      : isTt
-      ? ttResults.map((r) => ({
+      : isTt || isIg
+      ? (isIg ? igResults : ttResults).map((r) => ({
           Author: r.author || "",
           Link: r.url,
           "Post Date": r.postDate || "",
@@ -1048,7 +1166,7 @@ export default function Home() {
           Comments: r.comments ?? "",
         }));
 
-    const sheetName = isFb ? "Facebook" : isTt ? "TikTok" : "YouTube";
+    const sheetName = isFb ? "Facebook" : isTt ? "TikTok" : isIg ? "Instagram" : "YouTube";
     const XLSX = await import("xlsx");
     const worksheet = XLSX.utils.json_to_sheet(dataToExport);
     const csvOutput = XLSX.utils.sheet_to_csv(worksheet);
@@ -1066,31 +1184,32 @@ export default function Home() {
   const currentPlatform = PLATFORMS[activeTab];
 
   const activeInput =
-    activeTab === "facebook" ? fbInput : activeTab === "tiktok" ? ttInput : ytInput;
+    activeTab === "facebook" ? fbInput : activeTab === "tiktok" ? ttInput : activeTab === "instagram" ? igInput : ytInput;
 
   const setActiveInput = (val: string) => {
     if (activeTab === "facebook") setFbInput(val);
     else if (activeTab === "tiktok") setTtInput(val);
+    else if (activeTab === "instagram") setIgInput(val);
     else setYtInput(val);
   };
 
   const activeLoading =
-    activeTab === "facebook" ? fbLoading : activeTab === "tiktok" ? ttLoading : ytLoading;
+    activeTab === "facebook" ? fbLoading : activeTab === "tiktok" ? ttLoading : activeTab === "instagram" ? igLoading : ytLoading;
 
   const activeProgress =
-    activeTab === "facebook" ? fbProgress : activeTab === "tiktok" ? ttProgress : ytProgress;
+    activeTab === "facebook" ? fbProgress : activeTab === "tiktok" ? ttProgress : activeTab === "instagram" ? igProgress : ytProgress;
 
   const activeTimer =
-    activeTab === "facebook" ? fbTimer : activeTab === "tiktok" ? ttTimer : ytTimer;
+    activeTab === "facebook" ? fbTimer : activeTab === "tiktok" ? ttTimer : activeTab === "instagram" ? igTimer : ytTimer;
 
   const activeElapsed =
-    activeTab === "facebook" ? fbElapsed : activeTab === "tiktok" ? ttElapsed : ytElapsed;
+    activeTab === "facebook" ? fbElapsed : activeTab === "tiktok" ? ttElapsed : activeTab === "instagram" ? igElapsed : ytElapsed;
 
   const activeStats =
-    activeTab === "facebook" ? fbStats : activeTab === "tiktok" ? ttStats : ytStats;
+    activeTab === "facebook" ? fbStats : activeTab === "tiktok" ? ttStats : activeTab === "instagram" ? igStats : ytStats;
 
   const filteredActive =
-    activeTab === "facebook" ? filteredFb : activeTab === "tiktok" ? filteredTt : filteredYt;
+    activeTab === "facebook" ? filteredFb : activeTab === "tiktok" ? filteredTt : activeTab === "instagram" ? filteredIg : filteredYt;
 
   const avgSpeed = useMemo(() => {
     const time = activeElapsed ?? activeTimer;
@@ -1105,18 +1224,21 @@ export default function Home() {
   const handleStartScrape = () => {
     if (activeTab === "facebook") void handleScrapeFacebook();
     else if (activeTab === "tiktok") void handleScrapeTikTok();
+    else if (activeTab === "instagram") void handleScrapeInstagram();
     else void handleScrapeYouTube();
   };
 
   const handleStopScrape = () => {
     if (activeTab === "facebook") abortFbRef.current = true;
     else if (activeTab === "tiktok") abortTtRef.current = true;
+    else if (activeTab === "instagram") abortIgRef.current = true;
     else abortYtRef.current = true;
   };
 
   const handleLoadSample = () => {
     if (activeTab === "facebook") setFbInput(SAMPLE_FB_URLS);
     else if (activeTab === "tiktok") setTtInput(SAMPLE_TT_URLS);
+    else if (activeTab === "instagram") setIgInput(SAMPLE_IG_URLS);
     else setYtInput(SAMPLE_YT_URLS);
   };
 
@@ -1124,6 +1246,7 @@ export default function Home() {
     const urls = activeResults.filter((item) => !hasCompleteMetrics(item)).map((item) => item.url);
     if (activeTab === "facebook") void handleScrapeFacebook(urls);
     else if (activeTab === "tiktok") void handleScrapeTikTok(urls);
+    else if (activeTab === "instagram") void handleScrapeInstagram(urls);
     else void handleScrapeYouTube(urls);
   };
 
@@ -1136,7 +1259,7 @@ export default function Home() {
           <div>
             <h1 className="brand-title">Social Pulse Analytics</h1>
             <p className="brand-subtitle">
-              High-speed serverless scraper for Facebook Reels, TikTok videos &amp; YouTube Shorts
+              Serverless scraper for Facebook Reels, TikTok videos, YouTube Shorts &amp; Instagram Reels
             </p>
           </div>
         </div>
@@ -1174,6 +1297,16 @@ export default function Home() {
         >
           <span>▶️</span> YouTube Videos / Shorts
         </button>
+        <button
+          id="tab-ig-btn"
+          className={`tab-btn ${activeTab === "instagram" ? "active ig" : ""}`}
+          onClick={() => {
+            setActiveTab("instagram");
+            setSearchQuery("");
+          }}
+        >
+          <span>📷</span> Instagram Reels / Videos
+        </button>
       </nav>
 
       {/* Input Section */}
@@ -1184,7 +1317,9 @@ export default function Home() {
               {currentPlatform.icon} Input {currentPlatform.name} URLs
             </h2>
             <p className="card-subtitle">
-              Paste links below (one per line). Extract Author, Link, Post Date (UTC+7), and Numbers ready for Google Sheets.
+              {activeTab === "instagram"
+                ? "Public Reels/video links, one per line. Shares and saves may be unavailable. Dates use UTC+7 when a timestamp is available; otherwise the public calendar date is kept."
+                : "Paste links below (one per line). Extract Author, Link, Post Date (UTC+7), and Numbers ready for Google Sheets."}
             </p>
           </div>
           <span className={`platform-pill ${currentPlatform.badgeClass}`}>
