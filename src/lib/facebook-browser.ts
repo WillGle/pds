@@ -3,10 +3,20 @@ import puppeteer from "puppeteer-core";
 
 export async function renderFacebookPages(videoId: string) {
   const deadline = Date.now() + 45000;
-  const executablePath = process.env.CHROME_EXECUTABLE_PATH || await chromium.executablePath();
+  const isLocal =
+    !process.env.VERCEL &&
+    !process.env.AWS_LAMBDA_FUNCTION_NAME &&
+    Boolean(process.env.CHROME_EXECUTABLE_PATH);
+
+  const executablePath = isLocal
+    ? process.env.CHROME_EXECUTABLE_PATH!
+    : (await chromium.executablePath());
+
   const browser = await puppeteer.launch({
     executablePath,
-    args: chromium.args,
+    args: isLocal
+      ? ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+      : chromium.args,
     headless: true,
     timeout: 8000,
     defaultViewport: { width: 1440, height: 1080 },
