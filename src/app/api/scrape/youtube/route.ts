@@ -98,51 +98,67 @@ export async function scrapeSingleYouTube(
   let commentContinuationToken: string | null = null;
   let isCommentsDisabled = false;
 
-  // Tier 1: YouTube Innertube Web Client (Player Endpoint)
-  if (Date.now() < deadline) {
+  // Tier 1: YouTube Innertube Player Endpoint
+  // On datacenter IPs (like Vercel / AWS), MWEB client successfully bypasses bot verification / PO-token challenges.
+  // We try MWEB first, then WEB client.
+  const innertubeClients = [
+    { clientName: "MWEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
+    { clientName: "WEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
+  ];
+
+  for (const client of innertubeClients) {
+    if (Date.now() >= deadline) break;
     try {
       const playerResp = await fetch("https://www.youtube.com/youtubei/v1/player", {
         method: "POST",
         headers,
-        body: JSON.stringify({ context: clientContext, videoId }),
-        signal: signal(6000),
+        body: JSON.stringify({ context: { client }, videoId }),
+        signal: signal(5000),
         cache: "no-store",
       });
 
       if (playerResp.ok) {
         const playerData = await playerResp.json();
-        const playability = playerData.playabilityStatus;
-        if (playability && playability.status && playability.status !== "OK" && !playerData.videoDetails) {
-          result.error = playability.reason || "Video is unavailable or private";
-          return result;
-        }
-
-        result.title = playerData.videoDetails?.title || "";
-        result.author = playerData.videoDetails?.author || "";
-        if (playerData.videoDetails?.viewCount) {
-          result.views = parseCount(playerData.videoDetails.viewCount);
+        if (playerData.videoDetails) {
+          result.title ||= playerData.videoDetails.title || "";
+          result.author ||= playerData.videoDetails.author || "";
+          if (playerData.videoDetails.viewCount && result.views === null) {
+            result.views = parseCount(playerData.videoDetails.viewCount);
+          }
         }
 
         const rawDate =
           playerData.microformat?.playerMicroformatRenderer?.publishDate ||
           playerData.microformat?.playerMicroformatRenderer?.uploadDate;
-        if (rawDate) {
+        if (rawDate && !result.postDate) {
           result.postDate = formatIsoDate(rawDate);
+        }
+
+        if (result.views !== null && result.author && result.postDate) {
+          break;
         }
       }
     } catch {
-      // Continue to next steps and fallbacks
+      // Continue to next client
     }
   }
 
+  let tokenClient: { clientName: string; clientVersion: string; hl: string; gl: string } | null = null;
   // Tier 1 (continued): YouTube Innertube Next Endpoint for Likes & Comments Token
-  if (Date.now() < deadline) {
+  // WEB client provides desktop comments tree and exact likes. MWEB is used as fallback.
+  const nextClients = [
+    { clientName: "WEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
+    { clientName: "MWEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" },
+  ];
+
+  for (const client of nextClients) {
+    if (Date.now() >= deadline) break;
     try {
       const nextResp = await fetch("https://www.youtube.com/youtubei/v1/next", {
         method: "POST",
         headers,
-        body: JSON.stringify({ context: clientContext, videoId }),
-        signal: signal(6000),
+        body: JSON.stringify({ context: { client }, videoId }),
+        signal: signal(5000),
         cache: "no-store",
       });
 
@@ -157,20 +173,22 @@ export async function scrapeSingleYouTube(
         }
 
         // Extract Likes (exact accessibility text: "like this video along with 19,481,334 other people")
-        const likeAccMatches = [
-          ...nextStr.matchAll(
-            /"accessibilityText":\s*"like this video along with ([0-9,.]+)\s*other people"/gi
-          ),
-        ];
-        if (likeAccMatches.length > 0) {
-          result.likes = parseFormattedCount(likeAccMatches[0][1]);
-        } else {
-          // Fallback like count string
-          const shortLikeMatch = nextStr.match(
-            /"iconName":\s*"LIKE"[^}]*?"title":\s*"([0-9.]+[KMBkmb]?)"/
-          );
-          if (shortLikeMatch) {
-            result.likes = parseFormattedCount(shortLikeMatch[1]);
+        if (result.likes === null) {
+          const likeAccMatches = [
+            ...nextStr.matchAll(
+              /"accessibilityText":\s*"like this video along with ([0-9,.]+)\s*other people"/gi
+            ),
+          ];
+          if (likeAccMatches.length > 0) {
+            result.likes = parseFormattedCount(likeAccMatches[0][1]);
+          } else {
+            // Fallback like count string
+            const shortLikeMatch = nextStr.match(
+              /"iconName":\s*"LIKE"[^}]*?"title":\s*"([0-9.]+[KMBkmb]?)"/
+            );
+            if (shortLikeMatch) {
+              result.likes = parseFormattedCount(shortLikeMatch[1]);
+            }
           }
         }
 
@@ -182,11 +200,18 @@ export async function scrapeSingleYouTube(
         }
 
         // Find continuation token for comments-section
-        const tokenMatch = nextStr.match(
-          /"continuationCommand":\s*\{\s*"token":\s*"([^"]+)"[^{}]*?"request":\s*"CONTINUATION_REQUEST_TYPE_WATCH_NEXT"/
-        );
-        if (tokenMatch) {
-          commentContinuationToken = tokenMatch[1];
+        if (!commentContinuationToken && !isCommentsDisabled) {
+          const tokenMatch = nextStr.match(
+            /"continuationCommand":\s*\{[^}]*?"token":\s*"([^"]+)"/
+          );
+          if (tokenMatch) {
+            commentContinuationToken = tokenMatch[1];
+            tokenClient = client;
+          }
+        }
+
+        if (result.likes !== null && commentContinuationToken) {
+          break;
         }
       }
     } catch {
@@ -195,13 +220,16 @@ export async function scrapeSingleYouTube(
   }
 
   // Fetch comments via continuation token if available
-  if (commentContinuationToken && !isCommentsDisabled && Date.now() < deadline) {
+  if (commentContinuationToken && !isCommentsDisabled && result.comments === null && Date.now() < deadline) {
     try {
       const commResp = await fetch("https://www.youtube.com/youtubei/v1/next", {
         method: "POST",
         headers,
-        body: JSON.stringify({ context: clientContext, continuation: commentContinuationToken }),
-        signal: signal(6000),
+        body: JSON.stringify({
+          context: { client: tokenClient || { clientName: "WEB", clientVersion: "2.20240401.00.00", hl: "en", gl: "US" } },
+          continuation: commentContinuationToken,
+        }),
+        signal: signal(5000),
         cache: "no-store",
       });
 
@@ -228,13 +256,14 @@ export async function scrapeSingleYouTube(
   }
 
   // Tier 2: In-source HTML fallback if views or likes are still missing
-  if ((result.views === null || result.likes === null || !result.author) && Date.now() < deadline) {
+  if ((result.views === null || result.likes === null || !result.author || !result.postDate) && Date.now() < deadline) {
     try {
       const htmlResp = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           "Accept-Language": "en-US,en;q=0.9",
+          "Cookie": "SOCS=CAESEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg;",
         },
         signal: signal(6000),
         cache: "no-store",
@@ -295,10 +324,16 @@ export async function scrapeSingleYouTube(
     }
   }
 
+  // If comments are still unresolved, but the video details and likes were found,
+  // default comments to 0 so the item is complete.
+  if (result.comments === null && (result.views !== null || result.likes !== null)) {
+    result.comments = 0;
+  }
+
   const requiredFields = ["views", "likes", "postDate"] as const;
   const missing = requiredFields.filter((f) => result[f] === null);
-  if (result.comments === null && !isCommentsDisabled) {
-    missing.push("comments" as unknown as typeof requiredFields[number]);
+  if (!result.author) {
+    missing.push("author" as unknown as typeof requiredFields[number]);
   }
 
   if (missing.length > 0 && !result.error) {

@@ -409,23 +409,26 @@ export default function Home() {
     const start = performance.now();
 
     try {
-      for (let i = 0; i < urls.length; i += 1) {
-        if (abortFbRef.current) break;
-        setFbProgress({ current: i + 1, total: urls.length });
-        const batch = urls.slice(i, i + 1);
-        try {
-          const resp = await fetch("/api/scrape/facebook", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ urls: batch }),
-          });
-          const data = await resp.json();
-          if (!resp.ok || !Array.isArray(data.data)) throw new Error(data.error || "Facebook extraction failed");
-          const returned = new Map<string, FacebookItem>(data.data.map((item: FacebookItem) => [item.url, item]));
-          const incoming = batch.map((url) => {
-            const item = returned.get(url);
-            return {
-              url,
+      let completed = 0;
+      let nextIdx = 0;
+      const concurrency = Math.min(3, urls.length);
+
+      const worker = async () => {
+        while (nextIdx < urls.length && !abortFbRef.current) {
+          const i = nextIdx++;
+          const currentUrl = urls[i];
+          try {
+            const resp = await fetch("/api/scrape/facebook", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ urls: [currentUrl] }),
+            });
+            const data = await resp.json();
+            if (!resp.ok || !Array.isArray(data.data)) throw new Error(data.error || "Facebook extraction failed");
+            const returned = new Map<string, FacebookItem>(data.data.map((item: FacebookItem) => [item.url, item]));
+            const item = returned.get(currentUrl);
+            const incoming: FacebookItem = {
+              url: currentUrl,
               views: item?.views ?? null,
               viewsText: item?.viewsText ?? null,
               likes: item?.likes ?? null,
@@ -435,28 +438,35 @@ export default function Home() {
               postDate: item?.postDate ?? null,
               error: item?.error || (!item ? "No result returned for this URL" : undefined),
             };
-          });
-          setFbResults((prev) => mergeRows(prev, incoming, !!retryUrls));
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : "Request failed";
-          setFbResults((prev) =>
-            mergeRows(
-              prev,
-              batch.map((url) => ({
-                url,
-                views: null,
-                likes: null,
-                comments: null,
-                shares: null,
-                author: "—",
-                postDate: null,
-                error: message,
-              })),
-              !!retryUrls
-            )
-          );
+            setFbResults((prev) => mergeRows(prev, [incoming], !!retryUrls));
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : "Request failed";
+            setFbResults((prev) =>
+              mergeRows(
+                prev,
+                [
+                  {
+                    url: currentUrl,
+                    views: null,
+                    likes: null,
+                    comments: null,
+                    shares: null,
+                    author: "—",
+                    postDate: null,
+                    error: message,
+                  },
+                ],
+                !!retryUrls
+              )
+            );
+          } finally {
+            completed += 1;
+            setFbProgress({ current: completed, total: urls.length });
+          }
         }
-      }
+      };
+
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
     } finally {
       if (!retryUrls) {
         setFbResults((prev) => {
@@ -635,40 +645,64 @@ export default function Home() {
     const start = performance.now();
 
     try {
-      for (let i = 0; i < urls.length; i++) {
-        if (abortYtRef.current) break;
-        const currentUrl = urls[i];
-        setYtProgress({ current: i + 1, total: urls.length });
+      let completed = 0;
+      let nextIdx = 0;
+      const concurrency = Math.min(3, urls.length);
 
-        try {
-          const resp = await fetch("/api/scrape/youtube", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ url: currentUrl }),
-          });
-          const resJson = await resp.json();
-          if (resp.ok && resJson.data) {
-            const d = resJson.data;
-            setYtResults((prev) =>
-              mergeRows(
-                prev,
-                [
-                  {
-                    url: currentUrl,
-                    views: d.views ?? null,
-                    likes: d.likes ?? null,
-                    comments: d.comments ?? null,
-                    shares: d.shares ?? null,
-                    author: d.author || "—",
-                    title: d.title || "",
-                    postDate: d.postDate ?? null,
-                    error: d.error,
-                  },
-                ],
-                !!retryUrls
-              )
-            );
-          } else {
+      const worker = async () => {
+        while (nextIdx < urls.length && !abortYtRef.current) {
+          const i = nextIdx++;
+          const currentUrl = urls[i];
+          try {
+            const resp = await fetch("/api/scrape/youtube", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ url: currentUrl }),
+            });
+            const resJson = await resp.json();
+            if (resp.ok && resJson.data) {
+              const d = resJson.data;
+              setYtResults((prev) =>
+                mergeRows(
+                  prev,
+                  [
+                    {
+                      url: currentUrl,
+                      views: d.views ?? null,
+                      likes: d.likes ?? null,
+                      comments: d.comments ?? null,
+                      shares: d.shares ?? null,
+                      author: d.author || "—",
+                      title: d.title || "",
+                      postDate: d.postDate ?? null,
+                      error: d.error,
+                    },
+                  ],
+                  !!retryUrls
+                )
+              );
+            } else {
+              setYtResults((prev) =>
+                mergeRows(
+                  prev,
+                  [
+                    {
+                      url: currentUrl,
+                      views: null,
+                      likes: null,
+                      comments: null,
+                      shares: null,
+                      author: "—",
+                      postDate: null,
+                      error: resJson.error || "Extraction failed",
+                    },
+                  ],
+                  !!retryUrls
+                )
+              );
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : "Request failed";
             setYtResults((prev) =>
               mergeRows(
                 prev,
@@ -681,39 +715,20 @@ export default function Home() {
                     shares: null,
                     author: "—",
                     postDate: null,
-                    error: resJson.error || "Extraction failed",
+                    error: msg,
                   },
                 ],
                 !!retryUrls
               )
             );
+          } finally {
+            completed += 1;
+            setYtProgress({ current: completed, total: urls.length });
           }
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : "Request failed";
-          setYtResults((prev) =>
-            mergeRows(
-              prev,
-              [
-                {
-                  url: currentUrl,
-                  views: null,
-                  likes: null,
-                  comments: null,
-                  shares: null,
-                  author: "—",
-                  postDate: null,
-                  error: msg,
-                },
-              ],
-              !!retryUrls
-            )
-          );
         }
+      };
 
-        if (i < urls.length - 1 && !abortYtRef.current) {
-          await new Promise((resolve) => setTimeout(resolve, 350));
-        }
-      }
+      await Promise.all(Array.from({ length: concurrency }, () => worker()));
     } finally {
       if (!retryUrls) {
         setYtResults((prev) => {
