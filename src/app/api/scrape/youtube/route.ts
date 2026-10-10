@@ -21,7 +21,7 @@ export function extractYouTubeId(url: string): string | null {
   if (!url) return null;
   const clean = url.trim();
   const match = clean.match(
-    /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+?&v=|shorts\/|live\/))([a-zA-Z0-9_-]{11})/
+    /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?(?:[^#]*?&)?v=|shorts\/|live\/))([a-zA-Z0-9_-]{11})/
   );
   return match ? match[1] : null;
 }
@@ -33,14 +33,19 @@ function extractBalancedJson(html: string, varName: string): Record<string, unkn
   if (start === -1) return null;
   let depth = 0;
   let end = start;
+  // Track string context so braces inside JSON string values don't skew the depth count
+  let inString = false;
+  let escaped = false;
   for (let i = start; i < html.length; i++) {
-    if (html[i] === "{") depth++;
-    else if (html[i] === "}") {
+    const ch = html[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\" && inString) { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
       depth--;
-      if (depth === 0) {
-        end = i + 1;
-        break;
-      }
+      if (depth === 0) { end = i + 1; break; }
     }
   }
   try {

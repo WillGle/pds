@@ -84,7 +84,11 @@ const SAMPLE_YT_URLS = [
 
 function formatShortLink(url: string): string {
   if (!url) return "";
-  return url.replace(/^https?:\/\/(?:www\.)?/, "").split("?")[0].replace(/\/$/, "");
+  const withoutProtocol = url.replace(/^https?:\/\/(?:www\.)?/, "");
+  const base = withoutProtocol.split("?")[0].replace(/\/$/, "");
+  // Preserve ?v= for YouTube watch URLs so distinct videos aren't shown as the same link
+  const videoId = url.match(/[?&]v=([a-zA-Z0-9_-]{11})/)?.[1];
+  return videoId ? `${base}?v=${videoId}` : base;
 }
 
 function hasCompleteMetrics(item: FacebookItem | TikTokItem | YouTubeItem): boolean {
@@ -108,8 +112,9 @@ function hasCompleteMetrics(item: FacebookItem | TikTokItem | YouTubeItem): bool
   if ("saves" in item && (item.saves === null || !Number.isSafeInteger(item.saves) || item.saves < 0)) {
     return false;
   }
-  // For FB and TikTok, shares is a required counter. YouTube does not have public shares.
-  if ("shares" in item && ("saves" in item || "viewsText" in item)) {
+  // Facebook (has viewsText) and TikTok (has saves) expose public share counts; YouTube does not.
+  const sharesRequired = "saves" in item /* TikTok */ || "viewsText" in item /* Facebook */;
+  if ("shares" in item && sharesRequired) {
     if (item.shares === null || !Number.isSafeInteger(item.shares) || item.shares < 0) {
       return false;
     }
@@ -124,17 +129,222 @@ function facebookViews(item: FacebookItem): number | string {
 function mergeRows<T extends { url: string }>(previous: T[], incoming: T[], retry: boolean): T[] {
   if (!retry) return [...previous, ...incoming];
   const replacements = new Map(incoming.map((item) => [item.url, item]));
-  return previous.map((item) => replacements.get(item.url) || item);
+  const merged = previous.map((item) => replacements.get(item.url) ?? item);
+  // Append any incoming URLs that weren't already in the previous list (defensive for future refactors)
+  const previousUrls = new Set(previous.map((i) => i.url));
+  const appended = incoming.filter((i) => !previousUrls.has(i.url));
+  return [...merged, ...appended];
+}
+
+type PlatformKey = "facebook" | "tiktok" | "youtube";
+type ScrapedItem = FacebookItem | TikTokItem | YouTubeItem;
+
+const PLATFORMS = {
+  facebook: {
+    key: "facebook" as const,
+    name: "Facebook",
+    tabLabel: "Facebook Reels",
+    icon: "📘",
+    badgeClass: "fb" as const,
+    textareaId: "fb-url-input",
+    startBtnId: "fb-start-btn",
+    stopBtnId: "fb-stop-btn",
+    placeholder: "https://www.facebook.com/reel/1075481022014849",
+    showShares: true,
+    showSaves: false,
+  },
+  tiktok: {
+    key: "tiktok" as const,
+    name: "TikTok",
+    tabLabel: "TikTok Videos",
+    icon: "🎵",
+    badgeClass: "tt" as const,
+    textareaId: "tt-url-input",
+    startBtnId: "tt-start-btn",
+    stopBtnId: "tt-stop-btn",
+    placeholder: "https://www.tiktok.com/@user/video/1234567890",
+    showShares: true,
+    showSaves: true,
+  },
+  youtube: {
+    key: "youtube" as const,
+    name: "YouTube",
+    tabLabel: "YouTube Videos / Shorts",
+    icon: "▶️",
+    badgeClass: "yt" as const,
+    textareaId: "yt-url-input",
+    startBtnId: "yt-start-btn",
+    stopBtnId: "yt-stop-btn",
+    placeholder: "https://www.youtube.com/shorts/LCIdTSsXFvU",
+    showShares: false,
+    showSaves: false,
+  },
+};
+
+function getStatusInfo(item: ScrapedItem): {
+  type: "complete" | "rounded" | "incomplete" | "error";
+  label: string;
+  tooltip?: string;
+} {
+  if (item.error) {
+    return {
+      type: "error",
+      label: item.error,
+      tooltip: item.error,
+    };
+  }
+  if (hasCompleteMetrics(item)) {
+    if ("viewsText" in item && item.views === null && item.viewsText) {
+      return {
+        type: "rounded",
+        label: "Complete (rounded views)",
+        tooltip: `Views estimated from compact string: ${item.viewsText}`,
+      };
+    }
+    return {
+      type: "complete",
+      label: "Complete",
+    };
+  }
+  return {
+    type: "incomplete",
+    label: "Incomplete",
+    tooltip: "Missing or unverified counts or post date",
+  };
+}
+
+function ResultsTable({
+  platform,
+  items,
+  searchQuery,
+}: {
+  platform: PlatformKey;
+  items: ScrapedItem[];
+  searchQuery: string;
+}) {
+  const showShares = platform !== "youtube";
+  const showSaves = platform === "tiktok";
+  const totalCols = 7 + (showShares ? 1 : 0) + (showSaves ? 1 : 0);
+
+  return (
+    <table className="custom-table">
+      <thead>
+        <tr>
+          <th style={{ width: "38px", textAlign: "center" }}>#</th>
+          <th style={{ width: "160px" }}>Author</th>
+          <th style={{ width: "310px" }}>Link</th>
+          <th style={{ width: "110px" }} title="Posting date in Vietnam time (UTC+7)">
+            Post Date
+          </th>
+          <th className="th-num" style={{ width: "95px" }}>Views</th>
+          <th className="th-num" style={{ width: "85px" }}>Likes</th>
+          <th className="th-num" style={{ width: "85px" }}>Comments</th>
+          {showShares && <th className="th-num" style={{ width: "85px" }}>Shares</th>}
+          {showSaves && <th className="th-num" style={{ width: "85px" }}>Saves</th>}
+          <th style={{ width: "auto" }}>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {items.length === 0 ? (
+          <tr>
+            <td colSpan={totalCols} className="table-empty">
+              {searchQuery ? `No items match "${searchQuery}"` : "No scraped data yet"}
+            </td>
+          </tr>
+        ) : (
+          items.map((item, idx) => {
+            const status = getStatusInfo(item);
+            const authorTitle =
+              "title" in item && item.title ? `${item.author} (${item.title})` : item.author;
+            return (
+              <tr key={item.url + idx}>
+                <td className="td-index">{idx + 1}</td>
+                <td className="table-author" title={authorTitle}>
+                  {item.author || "—"}
+                </td>
+                <td className="table-link">
+                  <a
+                    href={item.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="short-link"
+                    title={item.url}
+                  >
+                    {formatShortLink(item.url)}
+                  </a>
+                </td>
+                <td className="td-date">
+                  {item.postDate || <span className="text-dim">N/A</span>}
+                </td>
+                <td className="td-num">
+                  {item.views !== null ? (
+                    <span>{item.views.toLocaleString()}</span>
+                  ) : "viewsText" in item && item.viewsText ? (
+                    <span>{facebookViews(item as FacebookItem)}</span>
+                  ) : (
+                    <span className="text-dim">N/A</span>
+                  )}
+                </td>
+                <td className="td-num">
+                  {item.likes !== null ? (
+                    item.likes.toLocaleString()
+                  ) : (
+                    <span className="text-dim">N/A</span>
+                  )}
+                </td>
+                <td className="td-num">
+                  {item.comments !== null ? (
+                    item.comments.toLocaleString()
+                  ) : (
+                    <span className="text-dim">—</span>
+                  )}
+                </td>
+                {showShares && (
+                  <td className="td-num">
+                    {item.shares !== null ? (
+                      item.shares.toLocaleString()
+                    ) : (
+                      <span className="text-dim">—</span>
+                    )}
+                  </td>
+                )}
+                {showSaves && (
+                  <td className="td-num">
+                    {"saves" in item && item.saves !== null ? (
+                      item.saves.toLocaleString()
+                    ) : (
+                      <span className="text-dim">—</span>
+                    )}
+                  </td>
+                )}
+                <td className="table-status">
+                  <span
+                    className={`status-badge status-${status.type}`}
+                    title={status.tooltip}
+                  >
+                    <span className="status-dot" />
+                    {status.label}
+                  </span>
+                </td>
+              </tr>
+            );
+          })
+        )}
+      </tbody>
+    </table>
+  );
 }
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<"facebook" | "tiktok" | "youtube">("facebook");
+  const [activeTab, setActiveTab] = useState<PlatformKey>("facebook");
 
   // Facebook state
   const [fbInput, setFbInput] = useState(SAMPLE_FB_URLS);
   const [fbResults, setFbResults] = useState<FacebookItem[]>([]);
   const [fbLoading, setFbLoading] = useState(false);
   const [fbElapsed, setFbElapsed] = useState<number | null>(null);
+  const [fbProgress, setFbProgress] = useState<{ current: number; total: number } | null>(null);
+  const abortFbRef = useRef<boolean>(false);
 
   // TikTok state
   const [ttInput, setTtInput] = useState(SAMPLE_TT_URLS);
@@ -156,15 +366,25 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState("");
   const [copiedType, setCopiedType] = useState<string | null>(null);
 
-  // Live timer during scraping
-  const [timer, setTimer] = useState(0);
+  // Per-tab live timers — isolated so each tab's counter never affects another
+  const [fbTimer, setFbTimer] = useState(0);
+  const [ttTimer, setTtTimer] = useState(0);
+  const [ytTimer, setYtTimer] = useState(0);
   useEffect(() => {
-    if (!fbLoading && !ttLoading && !ytLoading) return;
-    const interval = setInterval(() => {
-      setTimer((prev) => +(prev + 0.1).toFixed(1));
-    }, 100);
+    if (!fbLoading) return;
+    const interval = setInterval(() => setFbTimer((p) => +(p + 0.1).toFixed(1)), 100);
     return () => clearInterval(interval);
-  }, [fbLoading, ttLoading, ytLoading]);
+  }, [fbLoading]);
+  useEffect(() => {
+    if (!ttLoading) return;
+    const interval = setInterval(() => setTtTimer((p) => +(p + 0.1).toFixed(1)), 100);
+    return () => clearInterval(interval);
+  }, [ttLoading]);
+  useEffect(() => {
+    if (!ytLoading) return;
+    const interval = setInterval(() => setYtTimer((p) => +(p + 0.1).toFixed(1)), 100);
+    return () => clearInterval(interval);
+  }, [ytLoading]);
 
   // Handle Facebook scrape
   const handleScrapeFacebook = async (retryUrls?: string[]) => {
@@ -180,14 +400,18 @@ export default function Home() {
       );
     if (urls.length === 0) return;
 
+    abortFbRef.current = false;
     setFbLoading(true);
-    setTimer(0);
+    setFbTimer(0);
     if (!retryUrls) setFbResults([]);
     setFbElapsed(null);
+    setFbProgress({ current: 0, total: urls.length });
     const start = performance.now();
 
     try {
       for (let i = 0; i < urls.length; i += 1) {
+        if (abortFbRef.current) break;
+        setFbProgress({ current: i + 1, total: urls.length });
         const batch = urls.slice(i, i + 1);
         try {
           const resp = await fetch("/api/scrape/facebook", {
@@ -234,7 +458,26 @@ export default function Home() {
         }
       }
     } finally {
+      if (!retryUrls) {
+        setFbResults((prev) => {
+          const returned = new Map(prev.map((item) => [item.url, item]));
+          return urls.map(
+            (url) =>
+              returned.get(url) || {
+                url,
+                views: null,
+                likes: null,
+                comments: null,
+                shares: null,
+                author: "—",
+                postDate: null,
+                error: "Not processed; retry this URL",
+              }
+          );
+        });
+      }
       setFbLoading(false);
+      setFbProgress(null);
       setFbElapsed(+((performance.now() - start) / 1000).toFixed(2));
     }
   };
@@ -255,7 +498,7 @@ export default function Home() {
 
     abortTtRef.current = false;
     setTtLoading(true);
-    setTimer(0);
+    setTtTimer(0);
     if (!retryUrls) setTtResults([]);
     setTtElapsed(null);
     setTtProgress({ current: 0, total: urls.length });
@@ -385,7 +628,7 @@ export default function Home() {
 
     abortYtRef.current = false;
     setYtLoading(true);
-    setTimer(0);
+    setYtTimer(0);
     if (!retryUrls) setYtResults([]);
     setYtElapsed(null);
     setYtProgress({ current: 0, total: urls.length });
@@ -502,6 +745,7 @@ export default function Home() {
       setFbInput("");
       setFbResults([]);
       setFbElapsed(null);
+      setFbProgress(null);
     } else if (activeTab === "tiktok") {
       setTtInput("");
       setTtResults([]);
@@ -803,6 +1047,70 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
+  const currentPlatform = PLATFORMS[activeTab];
+
+  const activeInput =
+    activeTab === "facebook" ? fbInput : activeTab === "tiktok" ? ttInput : ytInput;
+
+  const setActiveInput = (val: string) => {
+    if (activeTab === "facebook") setFbInput(val);
+    else if (activeTab === "tiktok") setTtInput(val);
+    else setYtInput(val);
+  };
+
+  const activeLoading =
+    activeTab === "facebook" ? fbLoading : activeTab === "tiktok" ? ttLoading : ytLoading;
+
+  const activeProgress =
+    activeTab === "facebook" ? fbProgress : activeTab === "tiktok" ? ttProgress : ytProgress;
+
+  const activeTimer =
+    activeTab === "facebook" ? fbTimer : activeTab === "tiktok" ? ttTimer : ytTimer;
+
+  const activeElapsed =
+    activeTab === "facebook" ? fbElapsed : activeTab === "tiktok" ? ttElapsed : ytElapsed;
+
+  const activeStats =
+    activeTab === "facebook" ? fbStats : activeTab === "tiktok" ? ttStats : ytStats;
+
+  const filteredActive =
+    activeTab === "facebook" ? filteredFb : activeTab === "tiktok" ? filteredTt : filteredYt;
+
+  const avgSpeed = useMemo(() => {
+    const time = activeElapsed ?? activeTimer;
+    const count = activeStats.total;
+    if (!count) return "0.00";
+    return (time / count).toFixed(2);
+  }, [activeElapsed, activeTimer, activeStats.total]);
+
+  const hasResultsOrLoading = activeResults.length > 0 || activeLoading;
+  const urlCount = activeInput.split("\n").filter((l) => l.trim()).length;
+
+  const handleStartScrape = () => {
+    if (activeTab === "facebook") void handleScrapeFacebook();
+    else if (activeTab === "tiktok") void handleScrapeTikTok();
+    else void handleScrapeYouTube();
+  };
+
+  const handleStopScrape = () => {
+    if (activeTab === "facebook") abortFbRef.current = true;
+    else if (activeTab === "tiktok") abortTtRef.current = true;
+    else abortYtRef.current = true;
+  };
+
+  const handleLoadSample = () => {
+    if (activeTab === "facebook") setFbInput(SAMPLE_FB_URLS);
+    else if (activeTab === "tiktok") setTtInput(SAMPLE_TT_URLS);
+    else setYtInput(SAMPLE_YT_URLS);
+  };
+
+  const handleRetryIncomplete = () => {
+    const urls = activeResults.filter((item) => !hasCompleteMetrics(item)).map((item) => item.url);
+    if (activeTab === "facebook") void handleScrapeFacebook(urls);
+    else if (activeTab === "tiktok") void handleScrapeTikTok(urls);
+    else void handleScrapeYouTube(urls);
+  };
+
   return (
     <main className="app-container">
       {/* Top Header */}
@@ -854,115 +1162,52 @@ export default function Home() {
 
       {/* Input Section */}
       <section className="glass-card" aria-labelledby="input-section-title">
-        <h2 id="input-section-title" className="card-title">
-          {activeTab === "facebook"
-            ? "📘 Input Facebook Video / Reel URLs"
-            : activeTab === "tiktok"
-            ? "🎵 Input TikTok Video URLs"
-            : "▶️ Input YouTube Video / Shorts URLs"}
-        </h2>
-        <p className="card-subtitle">
-          Paste links below (one per line). Extract Author, Link, Post Date (UTC+7), and Numbers ready for Google Sheets.
-        </p>
+        <div className="section-header-row">
+          <div>
+            <h2 id="input-section-title" className="card-title">
+              {currentPlatform.icon} Input {currentPlatform.name} URLs
+            </h2>
+            <p className="card-subtitle">
+              Paste links below (one per line). Extract Author, Link, Post Date (UTC+7), and Numbers ready for Google Sheets.
+            </p>
+          </div>
+          <span className={`platform-pill ${currentPlatform.badgeClass}`}>
+            {currentPlatform.tabLabel}
+          </span>
+        </div>
 
-        {activeTab === "facebook" ? (
-          <textarea
-            id="fb-url-input"
-            className="input-textarea"
-            placeholder="https://www.facebook.com/reel/1075481022014849"
-            value={fbInput}
-            onChange={(e) => setFbInput(e.target.value)}
-          />
-        ) : activeTab === "tiktok" ? (
-          <textarea
-            id="tt-url-input"
-            className="input-textarea"
-            placeholder="https://www.tiktok.com/@user/video/1234567890"
-            value={ttInput}
-            onChange={(e) => setTtInput(e.target.value)}
-          />
-        ) : (
-          <textarea
-            id="yt-url-input"
-            className="input-textarea"
-            placeholder="https://www.youtube.com/shorts/LCIdTSsXFvU"
-            value={ytInput}
-            onChange={(e) => setYtInput(e.target.value)}
-          />
-        )}
+        <textarea
+          id={currentPlatform.textareaId}
+          className="input-textarea"
+          placeholder={currentPlatform.placeholder}
+          value={activeInput}
+          onChange={(e) => setActiveInput(e.target.value)}
+        />
 
         <div className="action-row">
           <div className="btn-group">
-            {activeTab === "facebook" ? (
-              <button
-                id="fb-start-btn"
-                className="btn-primary"
-                onClick={() => handleScrapeFacebook()}
-                disabled={fbLoading || !fbInput.trim()}
-              >
-                {fbLoading ? (
-                  <>
-                    <span className="spinner"></span> Scraping ({timer}s)...
-                  </>
-                ) : (
-                  <>🚀 Start Facebook Scraping</>
-                )}
-              </button>
-            ) : activeTab === "tiktok" ? (
-              <button
-                id="tt-start-btn"
-                className="btn-primary"
-                onClick={() => handleScrapeTikTok()}
-                disabled={ttLoading || !ttInput.trim()}
-              >
-                {ttLoading ? (
-                  <>
-                    <span className="spinner"></span> Scraping{" "}
-                    {ttProgress ? `(${ttProgress.current}/${ttProgress.total})` : ""} ({timer}s)...
-                  </>
-                ) : (
-                  <>🚀 Start TikTok Scraping</>
-                )}
-              </button>
-            ) : (
-              <button
-                id="yt-start-btn"
-                className="btn-primary"
-                onClick={() => handleScrapeYouTube()}
-                disabled={ytLoading || !ytInput.trim()}
-              >
-                {ytLoading ? (
-                  <>
-                    <span className="spinner"></span> Scraping{" "}
-                    {ytProgress ? `(${ytProgress.current}/${ytProgress.total})` : ""} ({timer}s)...
-                  </>
-                ) : (
-                  <>🚀 Start YouTube Scraping</>
-                )}
-              </button>
-            )}
+            <button
+              id={currentPlatform.startBtnId}
+              className={`btn-primary ${currentPlatform.badgeClass}`}
+              onClick={handleStartScrape}
+              disabled={activeLoading || !activeInput.trim()}
+            >
+              {activeLoading ? (
+                <>
+                  <span className="spinner"></span> Scraping{" "}
+                  {activeProgress ? `(${activeProgress.current}/${activeProgress.total})` : ""}{" "}
+                  ({activeTimer}s)...
+                </>
+              ) : (
+                <>🚀 Start {currentPlatform.name} Scraping</>
+              )}
+            </button>
 
-            {activeTab === "tiktok" && ttLoading && (
+            {activeLoading && (
               <button
-                id="tt-stop-btn"
-                className="btn-secondary"
-                style={{ borderColor: "#ef4444", color: "#f87171" }}
-                onClick={() => {
-                  abortTtRef.current = true;
-                }}
-              >
-                ⏹ Stop
-              </button>
-            )}
-
-            {activeTab === "youtube" && ytLoading && (
-              <button
-                id="yt-stop-btn"
-                className="btn-secondary"
-                style={{ borderColor: "#ef4444", color: "#f87171" }}
-                onClick={() => {
-                  abortYtRef.current = true;
-                }}
+                id={currentPlatform.stopBtnId}
+                className="btn-stop"
+                onClick={handleStopScrape}
               >
                 ⏹ Stop
               </button>
@@ -971,11 +1216,7 @@ export default function Home() {
             <button
               id="load-sample-btn"
               className="btn-secondary"
-              onClick={() => {
-                if (activeTab === "facebook") setFbInput(SAMPLE_FB_URLS);
-                else if (activeTab === "tiktok") setTtInput(SAMPLE_TT_URLS);
-                else setYtInput(SAMPLE_YT_URLS);
-              }}
+              onClick={handleLoadSample}
             >
               📋 Load Sample URLs
             </button>
@@ -990,73 +1231,29 @@ export default function Home() {
             </button>
           </div>
 
-          <div style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
-            Count:{" "}
-            <strong style={{ color: "var(--text-main)" }}>
-              {(activeTab === "facebook" ? fbInput : activeTab === "tiktok" ? ttInput : ytInput)
-                .split("\n")
-                .filter((l) => l.trim()).length}
-            </strong>{" "}
-            URLs
+          <div className="url-counter">
+            Count: <strong>{urlCount}</strong> URLs
           </div>
         </div>
 
-        {/* Live TikTok progress bar */}
-        {activeTab === "tiktok" && ttLoading && ttProgress && (
-          <div style={{ marginTop: "1rem" }}>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                marginBottom: "0.35rem",
-                fontSize: "0.82rem",
-                color: "var(--text-muted)",
-              }}
-            >
-              <span>Scraping TikTok data (rate-limit compliant)...</span>
-              <span>
-                <strong style={{ color: "var(--text-main)" }}>{ttProgress.current}</strong> / {ttProgress.total} (
-                {Math.round((ttProgress.current / ttProgress.total) * 100)}%)
+        {/* Live progress bar */}
+        {activeLoading && activeProgress && (
+          <div className="progress-card">
+            <div className="progress-header">
+              <span className="progress-label">
+                <span className="spinner"></span>
+                Scraping {currentPlatform.name} data (rate-limit compliant)...
+              </span>
+              <span className="progress-counter">
+                <strong>{activeProgress.current}</strong> / {activeProgress.total} (
+                {Math.round((activeProgress.current / activeProgress.total) * 100)}%)
               </span>
             </div>
-            <div style={{ width: "100%", height: "5px", backgroundColor: "#1e293b", borderRadius: "999px", overflow: "hidden" }}>
+            <div className="progress-track">
               <div
+                className={`progress-bar ${currentPlatform.badgeClass}`}
                 style={{
-                  width: `${(ttProgress.current / ttProgress.total) * 100}%`,
-                  height: "100%",
-                  backgroundColor: "#06b6d4",
-                  transition: "width 0.25s ease",
-                }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Live YouTube progress bar */}
-        {activeTab === "youtube" && ytLoading && ytProgress && (
-          <div style={{ marginTop: "1rem" }}>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                marginBottom: "0.35rem",
-                fontSize: "0.82rem",
-                color: "var(--text-muted)",
-              }}
-            >
-              <span>Scraping YouTube data...</span>
-              <span>
-                <strong style={{ color: "var(--text-main)" }}>{ytProgress.current}</strong> / {ytProgress.total} (
-                {Math.round((ytProgress.current / ytProgress.total) * 100)}%)
-              </span>
-            </div>
-            <div style={{ width: "100%", height: "5px", backgroundColor: "#1e293b", borderRadius: "999px", overflow: "hidden" }}>
-              <div
-                style={{
-                  width: `${(ytProgress.current / ytProgress.total) * 100}%`,
-                  height: "100%",
-                  backgroundColor: "#ef4444",
-                  transition: "width 0.25s ease",
+                  width: `${(activeProgress.current / activeProgress.total) * 100}%`,
                 }}
               />
             </div>
@@ -1065,20 +1262,12 @@ export default function Home() {
       </section>
 
       {/* KPI Stats Banner */}
-      {((activeTab === "facebook" && (fbResults.length > 0 || fbLoading)) ||
-        (activeTab === "tiktok" && (ttResults.length > 0 || ttLoading)) ||
-        (activeTab === "youtube" && (ytResults.length > 0 || ytLoading))) && (
+      {hasResultsOrLoading && (
         <section className="metrics-grid" aria-label="Performance and Aggregated Metrics">
           <div className="kpi-card">
             <div className="kpi-icon">📋</div>
             <div>
-              <div className="kpi-val">
-                {activeTab === "facebook"
-                  ? fbStats.total
-                  : activeTab === "tiktok"
-                  ? ttStats.total
-                  : ytStats.total}
-              </div>
+              <div className="kpi-val">{activeStats.total}</div>
               <div className="kpi-label">Total URLs Processed</div>
             </div>
           </div>
@@ -1087,12 +1276,7 @@ export default function Home() {
             <div className="kpi-icon">⏱️</div>
             <div>
               <div className="kpi-val">
-                {activeTab === "facebook"
-                  ? (fbElapsed !== null ? fbElapsed : timer)
-                  : activeTab === "tiktok"
-                  ? (ttElapsed !== null ? ttElapsed : timer)
-                  : (ytElapsed !== null ? ytElapsed : timer)}
-                s
+                {activeElapsed !== null ? activeElapsed : activeTimer}s
               </div>
               <div className="kpi-label">Total Elapsed Time</div>
             </div>
@@ -1101,21 +1285,7 @@ export default function Home() {
           <div className="kpi-card">
             <div className="kpi-icon">⚡</div>
             <div>
-              <div className="kpi-val">
-                {(
-                  ((activeTab === "facebook"
-                    ? fbElapsed || timer
-                    : activeTab === "tiktok"
-                    ? ttElapsed || timer
-                    : ytElapsed || timer) || 0) /
-                  (activeTab === "facebook"
-                    ? fbStats.total || 1
-                    : activeTab === "tiktok"
-                    ? ttStats.total || 1
-                    : ytStats.total || 1)
-                ).toFixed(2)}
-                s
-              </div>
+              <div className="kpi-val">{avgSpeed}s</div>
               <div className="kpi-label">Avg Speed / Video</div>
             </div>
           </div>
@@ -1123,14 +1293,7 @@ export default function Home() {
           <div className="kpi-card">
             <div className="kpi-icon">👁️</div>
             <div>
-              <div className="kpi-val">
-                {(activeTab === "facebook"
-                  ? fbStats.totalViews
-                  : activeTab === "tiktok"
-                  ? ttStats.totalViews
-                  : ytStats.totalViews
-                ).toLocaleString()}
-              </div>
+              <div className="kpi-val">{activeStats.totalViews.toLocaleString()}</div>
               <div className="kpi-label">Cumulative Views (exact counts only)</div>
             </div>
           </div>
@@ -1138,14 +1301,7 @@ export default function Home() {
           <div className="kpi-card">
             <div className="kpi-icon">👍</div>
             <div>
-              <div className="kpi-val">
-                {(activeTab === "facebook"
-                  ? fbStats.totalLikes
-                  : activeTab === "tiktok"
-                  ? ttStats.totalLikes
-                  : ytStats.totalLikes
-                ).toLocaleString()}
-              </div>
+              <div className="kpi-val">{activeStats.totalLikes.toLocaleString()}</div>
               <div className="kpi-label">Cumulative Likes (available)</div>
             </div>
           </div>
@@ -1153,37 +1309,15 @@ export default function Home() {
       )}
 
       {/* Scraped Results Section */}
-      {((activeTab === "facebook" && fbResults.length > 0) ||
-        (activeTab === "tiktok" && ttResults.length > 0) ||
-        (activeTab === "youtube" && ytResults.length > 0)) && (
+      {activeResults.length > 0 && (
         <section className="glass-card" aria-labelledby="results-title">
           <div className="results-header">
             <div>
               <h2 id="results-title" className="card-title">
-                📊 Scraped{" "}
-                {activeTab === "facebook"
-                  ? "Facebook"
-                  : activeTab === "tiktok"
-                  ? "TikTok"
-                  : "YouTube"}{" "}
-                Data
+                📊 Scraped {currentPlatform.name} Data
               </h2>
               <p className="card-subtitle">
-                Showing{" "}
-                {(activeTab === "facebook"
-                  ? filteredFb
-                  : activeTab === "tiktok"
-                  ? filteredTt
-                  : filteredYt
-                ).length}{" "}
-                of{" "}
-                {(activeTab === "facebook"
-                  ? fbResults
-                  : activeTab === "tiktok"
-                  ? ttResults
-                  : ytResults
-                ).length}{" "}
-                items
+                Showing {filteredActive.length} of {activeResults.length} items
               </p>
             </div>
 
@@ -1191,7 +1325,7 @@ export default function Home() {
               <input
                 id="search-input"
                 type="text"
-                placeholder="🔍 Search..."
+                placeholder="🔍 Search author, link..."
                 className="search-box"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -1200,7 +1334,7 @@ export default function Home() {
               <button
                 id="copy-author-link-values-btn"
                 disabled={!canExport}
-                className="btn-primary"
+                className={`btn-primary ${currentPlatform.badgeClass}`}
                 onClick={() => copyAuthorLinkNumbers(false)}
                 title="Copy formatted table (HTML + TSV) for Google Sheets, Excel, Notion, Docs"
                 style={{ fontWeight: 600 }}
@@ -1228,216 +1362,54 @@ export default function Home() {
                 {copiedType === "numbers-only" ? "✅ Copied Numbers!" : "📋 Numbers Only"}
               </button>
 
-              <button id="export-excel-btn" disabled={!canExport} className="btn-secondary" onClick={exportToExcel}>
+              <button
+                id="export-excel-btn"
+                disabled={!canExport}
+                className="btn-secondary"
+                onClick={exportToExcel}
+              >
                 📊 Excel
               </button>
 
-              <button id="export-csv-btn" disabled={!canExport} className="btn-secondary" onClick={exportToCsv}>
+              <button
+                id="export-csv-btn"
+                disabled={!canExport}
+                className="btn-secondary"
+                onClick={exportToCsv}
+              >
                 📄 CSV
               </button>
             </div>
           </div>
 
           {incompleteCount > 0 && (
-            <div role="status" style={{ marginBottom: "1rem" }}>
-              <p>
-                {incompleteCount} URLs still have missing or unverified counts or post dates. Copy and export are available after all URLs are complete.
-              </p>
+            <div className="alert-card warning" role="status">
+              <div className="alert-icon">⚠️</div>
+              <div className="alert-content">
+                <div className="alert-title">
+                  {incompleteCount} URL{incompleteCount > 1 ? "s" : ""} pending or incomplete
+                </div>
+                <div className="alert-text">
+                  Missing or unverified counts or post dates detected. Copy and export will unlock once all URLs are complete.
+                </div>
+              </div>
               <button
                 id="retry-incomplete-btn"
-                className="btn-secondary"
+                className="btn-warning"
                 disabled={isLoading}
-                onClick={() => {
-                  const urls = activeResults.filter((item) => !hasCompleteMetrics(item)).map((item) => item.url);
-                  if (activeTab === "facebook") void handleScrapeFacebook(urls);
-                  else if (activeTab === "tiktok") void handleScrapeTikTok(urls);
-                  else void handleScrapeYouTube(urls);
-                }}
+                onClick={handleRetryIncomplete}
               >
-                Retry incomplete URLs
+                🔄 Retry Incomplete ({incompleteCount})
               </button>
             </div>
           )}
 
           <div className="table-wrapper">
-            {activeTab === "facebook" ? (
-              <table className="custom-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: "38px", textAlign: "center" }}>#</th>
-                    <th style={{ width: "160px" }}>Author</th>
-                    <th style={{ width: "310px" }}>Link</th>
-                    <th style={{ width: "110px" }} title="Posting date in Vietnam time (UTC+7)">Post Date</th>
-                    <th className="th-num" style={{ width: "95px" }}>Views</th>
-                    <th className="th-num" style={{ width: "85px" }}>Likes</th>
-                    <th className="th-num" style={{ width: "85px" }}>Comments</th>
-                    <th className="th-num" style={{ width: "85px" }}>Shares</th>
-                    <th style={{ width: "auto" }}>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredFb.map((item, idx) => (
-                    <tr key={item.url + idx}>
-                      <td className="td-index">{idx + 1}</td>
-                      <td className="table-author">{item.author || "—"}</td>
-                      <td className="table-link" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        <a
-                          href={item.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="short-link"
-                          title={item.url}
-                        >
-                          {formatShortLink(item.url)}
-                        </a>
-                      </td>
-                      <td>{item.postDate || <span className="text-dim">N/A</span>}</td>
-                      <td className="td-num">
-                        {item.views !== null ? (
-                          <span>{item.views.toLocaleString()}</span>
-                        ) : item.viewsText ? (
-                          <span>{facebookViews(item)}</span>
-                        ) : (
-                          <span className="text-dim">N/A</span>
-                        )}
-                      </td>
-                      <td className="td-num">
-                        {item.likes !== null ? item.likes.toLocaleString() : <span className="text-dim">N/A</span>}
-                      </td>
-                      <td className="td-num">
-                        {item.comments !== null ? item.comments.toLocaleString() : <span className="text-dim">—</span>}
-                      </td>
-                      <td className="td-num">
-                        {item.shares !== null ? item.shares.toLocaleString() : <span className="text-dim">—</span>}
-                      </td>
-                      <td style={{ whiteSpace: "normal", fontSize: "0.8rem" }}>
-                        {item.error ||
-                          (hasCompleteMetrics(item)
-                            ? item.views === null
-                              ? "Complete (rounded views)"
-                              : "Complete"
-                            : "Incomplete")}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : activeTab === "tiktok" ? (
-              <table className="custom-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: "38px", textAlign: "center" }}>#</th>
-                    <th style={{ width: "160px" }}>Author</th>
-                    <th style={{ width: "310px" }}>Link</th>
-                    <th style={{ width: "110px" }} title="Posting date in Vietnam time (UTC+7)">Post Date</th>
-                    <th className="th-num" style={{ width: "95px" }}>Views</th>
-                    <th className="th-num" style={{ width: "85px" }}>Likes</th>
-                    <th className="th-num" style={{ width: "85px" }}>Comments</th>
-                    <th className="th-num" style={{ width: "85px" }}>Shares</th>
-                    <th className="th-num" style={{ width: "85px" }}>Saves</th>
-                    <th style={{ width: "auto" }}>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredTt.map((item, idx) => (
-                    <tr key={item.url + idx}>
-                      <td className="td-index">{idx + 1}</td>
-                      <td className="table-author">{item.author || "—"}</td>
-                      <td className="table-link" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        <a
-                          href={item.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="short-link"
-                          title={item.url}
-                        >
-                          {formatShortLink(item.url)}
-                        </a>
-                      </td>
-                      <td>{item.postDate || <span className="text-dim">N/A</span>}</td>
-                      <td className="td-num">
-                        {item.views !== null ? (
-                          <span>{item.views.toLocaleString()}</span>
-                        ) : (
-                          <span className="text-dim">N/A</span>
-                        )}
-                      </td>
-                      <td className="td-num">
-                        {item.likes !== null ? item.likes.toLocaleString() : <span className="text-dim">N/A</span>}
-                      </td>
-                      <td className="td-num">
-                        {item.comments !== null ? item.comments.toLocaleString() : <span className="text-dim">N/A</span>}
-                      </td>
-                      <td className="td-num">
-                        {item.shares !== null ? item.shares.toLocaleString() : <span className="text-dim">N/A</span>}
-                      </td>
-                      <td className="td-num">
-                        {item.saves !== null ? item.saves.toLocaleString() : <span className="text-dim">N/A</span>}
-                      </td>
-                      <td style={{ whiteSpace: "normal", fontSize: "0.8rem" }}>
-                        {item.error || (hasCompleteMetrics(item) ? "Complete" : "Incomplete")}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <table className="custom-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: "38px", textAlign: "center" }}>#</th>
-                    <th style={{ width: "160px" }}>Author</th>
-                    <th style={{ width: "310px" }}>Link</th>
-                    <th style={{ width: "110px" }} title="Posting date in Vietnam time (UTC+7)">Post Date</th>
-                    <th className="th-num" style={{ width: "95px" }}>Views</th>
-                    <th className="th-num" style={{ width: "85px" }}>Likes</th>
-                    <th className="th-num" style={{ width: "85px" }}>Comments</th>
-                    <th style={{ width: "auto" }}>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredYt.map((item, idx) => (
-                    <tr key={item.url + idx}>
-                      <td className="td-index">{idx + 1}</td>
-                      <td
-                        className="table-author"
-                        title={item.title ? `${item.author} (${item.title})` : item.author}
-                      >
-                        {item.author || "—"}
-                      </td>
-                      <td className="table-link" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        <a
-                          href={item.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="short-link"
-                          title={item.url}
-                        >
-                          {formatShortLink(item.url)}
-                        </a>
-                      </td>
-                      <td>{item.postDate || <span className="text-dim">N/A</span>}</td>
-                      <td className="td-num">
-                        {item.views !== null ? (
-                          <span>{item.views.toLocaleString()}</span>
-                        ) : (
-                          <span className="text-dim">N/A</span>
-                        )}
-                      </td>
-                      <td className="td-num">
-                        {item.likes !== null ? item.likes.toLocaleString() : <span className="text-dim">N/A</span>}
-                      </td>
-                      <td className="td-num">
-                        {item.comments !== null ? item.comments.toLocaleString() : <span className="text-dim">N/A</span>}
-                      </td>
-                      <td style={{ whiteSpace: "normal", fontSize: "0.8rem" }}>
-                        {item.error || (hasCompleteMetrics(item) ? "Complete" : "Incomplete")}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            <ResultsTable
+              platform={activeTab}
+              items={filteredActive}
+              searchQuery={searchQuery}
+            />
           </div>
         </section>
       )}

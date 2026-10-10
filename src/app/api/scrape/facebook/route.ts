@@ -103,8 +103,10 @@ function extractVideoMetrics(html: string, videoId: string, result: FacebookScra
       if (result.views !== null) result.viewsText ||= String(result.views);
     }
     result.likes ??= count(record.reaction_count) ?? count(record.like_count) ?? count(record.likers) ?? count(record.unified_reactors);
-    if (source === "watch") result.comments ??= count(record.total_comment_count) ?? count(record.comment_count) ?? count(record.comments_count);
-    if (source === "reel") result.shares ??= count(record.share_count) ?? count(record.shares_count) ?? parseCount(record.share_count_reduced);
+    // Attempt comments and shares from whichever page responds — don't restrict to a single source
+    // so that a bot-check or redirect on one URL doesn't permanently block the other field.
+    result.comments ??= count(record.total_comment_count) ?? count(record.comment_count) ?? count(record.comments_count);
+    result.shares ??= count(record.share_count) ?? count(record.shares_count) ?? parseCount(record.share_count_reduced);
   };
 
   const applyDate = (record: Record<string, unknown>) => {
