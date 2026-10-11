@@ -232,6 +232,7 @@ export default function CommentsScraper() {
         const res = await fetch(endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(45000),
           body: JSON.stringify({
             url: currentUrl,
             maxComments: maxCommentsPerUrl,

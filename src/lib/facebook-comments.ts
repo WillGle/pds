@@ -272,10 +272,19 @@ export async function scrapeFacebookComments(
           if (replyMatch) replyTo = replyMatch[1].trim();
         }
 
-        const dirAutos = Array.from(art.querySelectorAll<HTMLElement>('div[dir="auto"]'));
+        const authorEl = art.querySelector<HTMLElement>('a[role="link"]');
+
+        const textNodes = Array.from(art.querySelectorAll<HTMLElement>('div[dir="auto"], span[dir="auto"]')).filter((el) => {
+          if (authorEl && authorEl.contains(el)) return false;
+          const t = el.innerText?.trim();
+          if (!t) return false;
+          if (/^(?:thích|phản hồi|chia sẻ|like|reply|share|gửi|dịch|xem bản dịch|xem thêm|see more)$/i.test(t)) return false;
+          return true;
+        });
+
         let text = "";
-        if (dirAutos.length > 0) {
-          text = dirAutos[0].innerText?.trim() || "";
+        if (textNodes.length > 0) {
+          text = textNodes.map((n) => n.innerText?.trim() || "").filter(Boolean).join("\n");
         } else {
           text = art.innerText?.trim() || "";
         }
