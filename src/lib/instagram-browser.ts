@@ -45,7 +45,7 @@ export async function renderInstagramPage(url: string, deadline: number) {
     const shortcode = new URL(url).pathname.split("/").filter(Boolean).at(-1)!;
     const loaded = new URL(page.url());
     if (!["instagram.com", "www.instagram.com"].includes(loaded.hostname) ||
-      !new RegExp(`^/(?:[\\w.]+/)?(?:reel|p|tv)/${shortcode}/?$`).test(loaded.pathname)) {
+      !new RegExp(`^/(?:[\\w.]+/)?(?:reels?|p|tv)/${shortcode}/?$`).test(loaded.pathname)) {
       throw new Error("Instagram redirected away from the requested post");
     }
     await page.waitForNetworkIdle({ idleTime: 300, timeout: Math.max(1, Math.min(3000, deadline - Date.now())) })

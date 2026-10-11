@@ -23,8 +23,10 @@ function instagramUrl(raw: string) {
     const url = new URL(raw);
     if (!["https:", "http:"].includes(url.protocol) ||
       !["instagram.com", "www.instagram.com"].includes(url.hostname) || url.username || url.password || url.port) return null;
-    const match = url.pathname.match(/^\/(?:[\w.]+\/)?(reel|p|tv)\/([\w-]{5,40})\/?$/);
-    return match ? { shortcode: match[2], url: `https://www.instagram.com/${match[1]}/${match[2]}/` } : null;
+    const match = url.pathname.match(/^\/(?:[\w.]+\/)?(reels?|p|tv)\/([\w-]{5,40})\/?$/);
+    if (!match) return null;
+    const type = match[1] === "reels" ? "reel" : match[1];
+    return { shortcode: match[2], url: `https://www.instagram.com/${type}/${match[2]}/` };
   } catch {
     return null;
   }
