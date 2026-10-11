@@ -7,9 +7,6 @@ export interface CommentRow {
   Comment: string;
 }
 
-type PlatformChoice = "auto" | "facebook" | "tiktok";
-type ConcurrencyMode = "fast" | "turbo" | "sequential";
-
 interface UrlProcessStatus {
   url: string;
   platform: "facebook" | "tiktok" | "unknown";
@@ -18,7 +15,7 @@ interface UrlProcessStatus {
   error?: string;
 }
 
-const USER_SAMPLE_URLS = [
+const SAMPLE_URLS = [
   "https://www.tiktok.com/@do_toc_do/video/7675974583278685461",
   "https://www.tiktok.com/@taotentho94/video/7676040678341709063",
   "https://www.tiktok.com/@maly.gaugau/video/7674580711814335764",
@@ -49,13 +46,6 @@ const USER_SAMPLE_URLS = [
   "https://www.facebook.com/reel/1779820026593617",
 ];
 
-const SAMPLE_SINGLE_FB = "https://www.facebook.com/zuck/posts/pfbid023Anbd22r92VQN9K23DGhd8t6WSK5g8S8cmjKvNogJEYhFQRwHSWdUz6sc5cJjPcYl";
-const SAMPLE_SINGLE_TT = "https://www.tiktok.com/@do_toc_do/video/7675974583278685461";
-
-/**
- * Extracts clean URLs from any string, whether separated by newlines, spaces,
- * commas, or formatted as Markdown links `[url](url)` or `<url>`.
- */
 export function extractUrls(text: string): string[] {
   if (!text) return [];
   const matches = text.match(/https?:\/\/[^\s)\]"'>]+/gi);
@@ -75,14 +65,9 @@ function detectUrlPlatform(url: string): "facebook" | "tiktok" | "unknown" {
   return "unknown";
 }
 
-/**
- * Clean & normalize comment text for NLP Sentiment Analysis
- */
 function cleanCommentText(raw: string): string {
   if (!raw) return "";
-  // Strip zero-width spaces and control chars
   let text = raw.replace(/[\u200B-\u200D\uFEFF]/g, "");
-  // Normalize carriage returns and multiple consecutive blank lines
   text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   text = text.replace(/\n{3,}/g, "\n\n");
   return text.trim();
@@ -90,22 +75,18 @@ function cleanCommentText(raw: string): string {
 
 export default function CommentsScraper() {
   const [urlsInput, setUrlsInput] = useState<string>("");
-  const [platform, setPlatform] = useState<PlatformChoice>("auto");
   const [maxCommentsPerUrl, setMaxCommentsPerUrl] = useState<number>(100);
   const [expandReplies, setExpandReplies] = useState<boolean>(true);
-  const [concurrencyMode, setConcurrencyMode] = useState<ConcurrencyMode>("fast");
   const [deduplicate, setDeduplicate] = useState<boolean>(false);
 
   const [loading, setLoading] = useState(false);
   const [timer, setTimer] = useState(0);
   const [elapsed, setElapsed] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
-  // Batch progress tracking
+  // Batch tracking
   const [batchStatuses, setBatchStatuses] = useState<UrlProcessStatus[]>([]);
-  const [showStatusLog, setShowStatusLog] = useState<boolean>(false);
 
-  // Aggregated results: strictly [id, Comment]
+  // Results: strictly [id, Comment]
   const [results, setResults] = useState<CommentRow[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [copiedType, setCopiedType] = useState<string | null>(null);
@@ -121,66 +102,34 @@ export default function CommentsScraper() {
     return () => clearInterval(interval);
   }, [loading]);
 
-  // Parsed URLs list
+  // Clean URLs list
   const parsedUrls = useMemo(() => {
     return extractUrls(urlsInput);
   }, [urlsInput]);
 
-  // Counts breakdown
-  const urlStats = useMemo(() => {
-    let fbCount = 0;
-    let ttCount = 0;
-    let otherCount = 0;
-    for (const u of parsedUrls) {
-      const p = detectUrlPlatform(u);
-      if (p === "facebook") fbCount++;
-      else if (p === "tiktok") ttCount++;
-      else otherCount++;
-    }
-    return { fbCount, ttCount, otherCount, total: parsedUrls.length };
-  }, [parsedUrls]);
+  // Concurrency Limits (3 TikTok, 2 Facebook)
+  const maxTikTokWorkers = 3;
+  const maxFacebookWorkers = 2;
 
-  // Concurrency Limits based on mode
-  const { maxTikTokWorkers, maxFacebookWorkers } = useMemo(() => {
-    if (concurrencyMode === "turbo") {
-      return { maxTikTokWorkers: 5, maxFacebookWorkers: 2 };
-    }
-    if (concurrencyMode === "sequential") {
-      return { maxTikTokWorkers: 1, maxFacebookWorkers: 1 };
-    }
-    // "fast" default
-    return { maxTikTokWorkers: 3, maxFacebookWorkers: 2 };
-  }, [concurrencyMode]);
-
-  // Worker Pool Batch Execution (Adaptive Concurrency)
+  // Worker Pool Batch Execution
   const runBatchScraping = async (urlsToRun: string[], isRetry = false) => {
-    if (urlsToRun.length === 0) {
-      setError("Vui lòng nhập hoặc dán ít nhất 1 link bài viết Facebook hoặc TikTok.");
-      return;
-    }
+    if (urlsToRun.length === 0) return;
 
     setLoading(true);
-    setError(null);
     setTimer(0);
     setElapsed(null);
     abortRef.current = false;
 
     if (!isRetry) {
       setResults([]);
-      const initialStatuses: UrlProcessStatus[] = urlsToRun.map((u) => {
-        let targetPlat = detectUrlPlatform(u);
-        if (platform === "facebook") targetPlat = "facebook";
-        else if (platform === "tiktok") targetPlat = "tiktok";
-        return {
-          url: u,
-          platform: targetPlat,
-          status: "pending",
-          commentCount: 0,
-        };
-      });
+      const initialStatuses: UrlProcessStatus[] = urlsToRun.map((u) => ({
+        url: u,
+        platform: detectUrlPlatform(u),
+        status: "pending",
+        commentCount: 0,
+      }));
       setBatchStatuses(initialStatuses);
     } else {
-      // Mark retrying urls as pending
       setBatchStatuses((prev) =>
         prev.map((item) =>
           urlsToRun.includes(item.url)
@@ -192,13 +141,10 @@ export default function CommentsScraper() {
 
     const startTime = Date.now();
 
-    // Map each url to its status index
-    const queue = urlsToRun.map((u) => {
-      let targetPlat = detectUrlPlatform(u);
-      if (platform === "facebook") targetPlat = "facebook";
-      else if (platform === "tiktok") targetPlat = "tiktok";
-      return { url: u, platform: targetPlat };
-    });
+    const queue = urlsToRun.map((u) => ({
+      url: u,
+      platform: detectUrlPlatform(u),
+    }));
 
     let activeTt = 0;
     let activeFb = 0;
@@ -207,7 +153,6 @@ export default function CommentsScraper() {
     const executeLink = async (item: { url: string; platform: "facebook" | "tiktok" | "unknown" }) => {
       const { url: currentUrl, platform: targetPlat } = item;
 
-      // Update status to processing
       setBatchStatuses((prev) =>
         prev.map((s) => (s.url === currentUrl ? { ...s, status: "processing" } : s))
       );
@@ -216,7 +161,7 @@ export default function CommentsScraper() {
         setBatchStatuses((prev) =>
           prev.map((s) =>
             s.url === currentUrl
-              ? { ...s, status: "error", error: "Không nhận diện được nền tảng" }
+              ? { ...s, status: "error", error: "Unsupported platform URL" }
               : s
           )
         );
@@ -260,12 +205,10 @@ export default function CommentsScraper() {
           ? data.data
           : [];
 
-        // Clean & normalize comment texts
         const cleanedComments = incomingRows
           .map((r) => cleanCommentText(r.Comment))
           .filter(Boolean);
 
-        // Append to results with monotonically increasing ID
         setResults((prev) => {
           const baseId = prev.length;
           const newRows: CommentRow[] = cleanedComments.map((text, idx) => ({
@@ -283,7 +226,7 @@ export default function CommentsScraper() {
           )
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Lỗi kết nối";
+        const msg = err instanceof Error ? err.message : "Connection failed";
         setBatchStatuses((prev) =>
           prev.map((s) =>
             s.url === currentUrl ? { ...s, status: "error", error: msg } : s
@@ -292,7 +235,6 @@ export default function CommentsScraper() {
       }
     };
 
-    // Worker dispatcher loop
     await new Promise<void>((resolve) => {
       const scheduleNext = () => {
         if (abortRef.current) {
@@ -300,7 +242,6 @@ export default function CommentsScraper() {
           return;
         }
 
-        // Try to dispatch tasks as long as slots are available
         while (queueIdx < queue.length) {
           const nextItem = queue[queueIdx];
           const isTt = nextItem.platform === "tiktok";
@@ -321,18 +262,15 @@ export default function CommentsScraper() {
               scheduleNext();
             });
           } else if (!isTt && !isFb) {
-            // Unknown platform, fast-fail
             queueIdx++;
             executeLink(nextItem).finally(() => {
               scheduleNext();
             });
           } else {
-            // All workers busy for this platform
             break;
           }
         }
 
-        // Check completion condition
         if (queueIdx >= queue.length && activeTt === 0 && activeFb === 0) {
           resolve();
         }
@@ -363,11 +301,21 @@ export default function CommentsScraper() {
     setLoading(false);
   };
 
-  // Filtered & deduplicated comments for view & export
+  const handleLoadSample = () => {
+    setUrlsInput(SAMPLE_URLS.join("\n"));
+  };
+
+  const handleClear = () => {
+    setUrlsInput("");
+    setResults([]);
+    setBatchStatuses([]);
+    setElapsed(null);
+  };
+
+  // Filtered & deduplicated comments
   const displayResults = useMemo(() => {
     let list = results;
 
-    // Optional deduplication
     if (deduplicate) {
       const seen = new Set<string>();
       const deduped: CommentRow[] = [];
@@ -381,7 +329,6 @@ export default function CommentsScraper() {
       list = deduped;
     }
 
-    // Search query filter
     if (searchQuery.trim()) {
       const query = searchQuery.trim().toLowerCase();
       list = list.filter(
@@ -394,17 +341,12 @@ export default function CommentsScraper() {
     return list;
   }, [results, deduplicate, searchQuery]);
 
-  // Sentiment Dataset Quick Stats
+  // Dataset Quick Stats
   const datasetStats = useMemo(() => {
     if (results.length === 0) return null;
-    const totalWords = results.reduce(
-      (acc, r) => acc + (r.Comment.split(/\s+/).filter(Boolean).length || 1),
-      0
-    );
-    const avgWords = Math.round(totalWords / results.length);
     const uniqueSet = new Set(results.map((r) => r.Comment.toLowerCase().trim()));
     const uniquePercent = Math.round((uniqueSet.size / results.length) * 100);
-    return { avgWords, uniqueCount: uniqueSet.size, uniquePercent };
+    return { uniquePercent };
   }, [results]);
 
   // Export handlers
@@ -420,7 +362,7 @@ export default function CommentsScraper() {
     });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `sentiment_comments_${displayResults.length}_rows.csv`;
+    link.download = `comments_sentiment_${displayResults.length}_rows.csv`;
     link.click();
   };
 
@@ -431,7 +373,7 @@ export default function CommentsScraper() {
       const worksheet = XLSX.utils.json_to_sheet(displayResults);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, "Comments");
-      XLSX.writeFile(workbook, `sentiment_comments_${displayResults.length}_rows.xlsx`);
+      XLSX.writeFile(workbook, `comments_sentiment_${displayResults.length}_rows.xlsx`);
     } catch (e) {
       console.error("Export Excel error:", e);
     }
@@ -445,18 +387,18 @@ export default function CommentsScraper() {
     const blob = new Blob([jsonl], { type: "application/x-ndjson;charset=utf-8;" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `sentiment_dataset_${displayResults.length}.jsonl`;
+    link.download = `comments_dataset_${displayResults.length}.jsonl`;
     link.click();
   };
 
-  const handleCopyTable = (includeHeader = true) => {
+  const handleCopyTable = (includeHeader = false) => {
     if (displayResults.length === 0) return;
     const header = includeHeader ? "id\tComment\n" : "";
     const body = displayResults
       .map((r) => `${r.id}\t${r.Comment.replace(/[\r\n\t]+/g, " ")}`)
       .join("\n");
     navigator.clipboard.writeText(header + body);
-    setCopiedType("tsv");
+    setCopiedType(includeHeader ? "headers" : "tsv");
     setTimeout(() => setCopiedType(null), 2000);
   };
 
@@ -467,10 +409,10 @@ export default function CommentsScraper() {
     setTimeout(() => setCopiedType(null), 2000);
   };
 
-  // Progress metrics
   const completedLinks = batchStatuses.filter(
     (s) => s.status === "success" || s.status === "error"
   ).length;
+  const completedSuccessCount = batchStatuses.filter((s) => s.status === "success").length;
   const failedLinksCount = batchStatuses.filter((s) => s.status === "error").length;
   const activeProcessingCount = batchStatuses.filter((s) => s.status === "processing").length;
   const progressPercent =
@@ -479,290 +421,47 @@ export default function CommentsScraper() {
       : 0;
 
   return (
-    <div className="comments-scraper-root">
-      {/* Input Section */}
-      <section className="glass-card" aria-labelledby="comments-input-title">
+    <>
+      {/* Input Section - Matched to other tabs */}
+      <section className="glass-card" aria-labelledby="input-section-title">
         <div className="section-header-row">
           <div>
-            <h2 id="comments-input-title" className="card-title">
-              💬 Multimodal Sentiment Comments Scraper (Ultra-Fast Batch Mode)
+            <h2 id="input-section-title" className="card-title">
+              💬 Input Comments URLs
             </h2>
             <p className="card-subtitle">
-              Cào đồng thời hàng loạt liên kết Facebook &amp; TikTok với cơ chế <strong>Đa luồng song song (Adaptive Concurrency)</strong>. Toàn bộ bình luận được gộp vào <strong>1 bảng duy nhất [id | Comment]</strong> phục vụ huấn luyện và đánh giá mô hình Sentiment Analysis.
+              Paste links below (Facebook &amp; TikTok, one per line). Extract all comments into a single continuous 2-column [id | Comment] table ready for Multimodal Sentiment Analysis.
             </p>
           </div>
-          <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-            <span className="platform-pill cmts">
-              {platform === "facebook"
-                ? "📘 Facebook Only"
-                : platform === "tiktok"
-                ? "🎵 TikTok Only"
-                : "🌐 Tự động nhận diện (Hỗn hợp)"}
-            </span>
-          </div>
+          <span className="platform-pill cmts">
+            💬 Comments Scraper
+          </span>
         </div>
 
-        {/* Speed & Platform Selection Toolbar */}
-        <div
-          style={{
-            display: "flex",
-            gap: "1.25rem",
-            margin: "0.75rem 0",
-            flexWrap: "wrap",
-            alignItems: "center",
-          }}
-        >
-          {/* Platform selector */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-            <span style={{ fontSize: "0.82rem", color: "var(--text-muted)", fontWeight: 500 }}>
-              Nền tảng:
-            </span>
-            <button
-              type="button"
-              className={`btn-secondary ${platform === "auto" ? "active" : ""}`}
-              style={{
-                padding: "0.3rem 0.65rem",
-                fontSize: "0.78rem",
-                background: platform === "auto" ? "#1e293b" : "transparent",
-                borderColor: platform === "auto" ? "#10b981" : "var(--border-main)",
-                color: platform === "auto" ? "#34d399" : "var(--text-body)",
-              }}
-              onClick={() => setPlatform("auto")}
-            >
-              🌐 Tự động
-            </button>
-            <button
-              type="button"
-              className={`btn-secondary ${platform === "facebook" ? "active" : ""}`}
-              style={{
-                padding: "0.3rem 0.65rem",
-                fontSize: "0.78rem",
-                background: platform === "facebook" ? "rgba(59, 130, 246, 0.15)" : "transparent",
-                borderColor: platform === "facebook" ? "#3b82f6" : "var(--border-main)",
-                color: platform === "facebook" ? "#60a5fa" : "var(--text-body)",
-              }}
-              onClick={() => setPlatform("facebook")}
-            >
-              📘 Facebook
-            </button>
-            <button
-              type="button"
-              className={`btn-secondary ${platform === "tiktok" ? "active" : ""}`}
-              style={{
-                padding: "0.3rem 0.65rem",
-                fontSize: "0.78rem",
-                background: platform === "tiktok" ? "rgba(244, 63, 94, 0.15)" : "transparent",
-                borderColor: platform === "tiktok" ? "#f43f5e" : "var(--border-main)",
-                color: platform === "tiktok" ? "#fb7185" : "var(--text-body)",
-              }}
-              onClick={() => setPlatform("tiktok")}
-            >
-              🎵 TikTok
-            </button>
-          </div>
+        <textarea
+          id="comments-urls-input"
+          className="input-textarea"
+          placeholder={`https://www.tiktok.com/@do_toc_do/video/7675974583278685461\nhttps://www.facebook.com/reel/1751123646230423`}
+          value={urlsInput}
+          onChange={(e) => setUrlsInput(e.target.value)}
+        />
 
-          {/* Concurrency Speed Mode */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-            <span style={{ fontSize: "0.82rem", color: "var(--text-muted)", fontWeight: 500 }}>
-              ⚡ Tốc độ cào:
-            </span>
-            <button
-              type="button"
-              className={`btn-secondary ${concurrencyMode === "fast" ? "active" : ""}`}
-              style={{
-                padding: "0.3rem 0.65rem",
-                fontSize: "0.78rem",
-                background: concurrencyMode === "fast" ? "rgba(16, 185, 129, 0.15)" : "transparent",
-                borderColor: concurrencyMode === "fast" ? "#10b981" : "var(--border-main)",
-                color: concurrencyMode === "fast" ? "#34d399" : "var(--text-body)",
-              }}
-              onClick={() => setConcurrencyMode("fast")}
-              title="Chạy song song 3 luồng TikTok, 2 luồng Facebook (Cân bằng tốt nhất)"
-            >
-              ⚡ Nhanh (Song song x3 TT, x2 FB)
-            </button>
-            <button
-              type="button"
-              className={`btn-secondary ${concurrencyMode === "turbo" ? "active" : ""}`}
-              style={{
-                padding: "0.3rem 0.65rem",
-                fontSize: "0.78rem",
-                background: concurrencyMode === "turbo" ? "rgba(14, 165, 233, 0.15)" : "transparent",
-                borderColor: concurrencyMode === "turbo" ? "#0ea5e9" : "var(--border-main)",
-                color: concurrencyMode === "turbo" ? "#38bdf8" : "var(--text-body)",
-              }}
-              onClick={() => setConcurrencyMode("turbo")}
-              title="Chạy song song 5 luồng TikTok, 2 luồng Facebook (Tối đa tốc độ)"
-            >
-              🚀 Siêu tốc (x5 TT, x2 FB)
-            </button>
-            <button
-              type="button"
-              className={`btn-secondary ${concurrencyMode === "sequential" ? "active" : ""}`}
-              style={{
-                padding: "0.3rem 0.65rem",
-                fontSize: "0.78rem",
-                background: concurrencyMode === "sequential" ? "#1e293b" : "transparent",
-                borderColor: concurrencyMode === "sequential" ? "#64748b" : "var(--border-main)",
-                color: concurrencyMode === "sequential" ? "#94a3b8" : "var(--text-body)",
-              }}
-              onClick={() => setConcurrencyMode("sequential")}
-              title="Chạy tuần tự 1 link tại một thời điểm (Tiết kiệm RAM nhất)"
-            >
-              🛡️ Tuần tự (1-by-1)
-            </button>
-          </div>
-        </div>
-
-        {/* URLs Textarea Input */}
-        <div style={{ marginTop: "0.5rem" }}>
-          <textarea
-            id="comments-urls-input"
-            className="input-textarea"
-            rows={6}
-            style={{ minHeight: "150px" }}
-            value={urlsInput}
-            onChange={(e) => setUrlsInput(e.target.value)}
-            placeholder={`Dán danh sách các link Facebook & TikTok tại đây (hỗ trợ nhiều link cùng lúc, mỗi dòng 1 link hoặc dạng markdown [url](url))...\nVí dụ:\nhttps://www.tiktok.com/@do_toc_do/video/7675974583278685461\nhttps://www.facebook.com/reel/1751123646230423`}
-          />
-        </div>
-
-        {/* Link Counter & Badges */}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            marginTop: "0.5rem",
-            fontSize: "0.82rem",
-            color: "var(--text-muted)",
-            flexWrap: "wrap",
-            gap: "0.5rem",
-          }}
-        >
-          <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
-            <span>
-              Đã nhận diện:{" "}
-              <strong style={{ color: "var(--text-main)", fontFamily: "var(--font-mono)" }}>
-                {urlStats.total}
-              </strong>{" "}
-              URLs
-            </span>
-            {urlStats.ttCount > 0 && (
-              <span
-                style={{
-                  background: "rgba(244, 63, 94, 0.12)",
-                  color: "#fb7185",
-                  padding: "0.15rem 0.5rem",
-                  borderRadius: "999px",
-                  fontSize: "0.75rem",
-                  fontFamily: "var(--font-mono)",
-                }}
-              >
-                🎵 TikTok: {urlStats.ttCount}
-              </span>
-            )}
-            {urlStats.fbCount > 0 && (
-              <span
-                style={{
-                  background: "rgba(59, 130, 246, 0.12)",
-                  color: "#60a5fa",
-                  padding: "0.15rem 0.5rem",
-                  borderRadius: "999px",
-                  fontSize: "0.75rem",
-                  fontFamily: "var(--font-mono)",
-                }}
-              >
-                📘 Facebook: {urlStats.fbCount}
-              </span>
-            )}
-            {urlStats.otherCount > 0 && (
-              <span
-                style={{
-                  background: "rgba(239, 68, 68, 0.12)",
-                  color: "#f87171",
-                  padding: "0.15rem 0.5rem",
-                  borderRadius: "999px",
-                  fontSize: "0.75rem",
-                  fontFamily: "var(--font-mono)",
-                }}
-              >
-                ⚠️ Khác: {urlStats.otherCount}
-              </span>
-            )}
-          </div>
-
-          <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
-            <button
-              type="button"
-              className="btn-secondary"
-              style={{ fontSize: "0.75rem", padding: "0.25rem 0.6rem" }}
-              onClick={() => {
-                setUrlsInput(USER_SAMPLE_URLS.join("\n"));
-                setPlatform("auto");
-              }}
-              title="Tải toàn bộ 28 link mẫu (18 TikTok + 10 Facebook)"
-            >
-              📋 Mẫu 28 links của bạn (18 TT + 10 FB)
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              style={{ fontSize: "0.75rem", padding: "0.25rem 0.6rem" }}
-              onClick={() => {
-                setUrlsInput(SAMPLE_SINGLE_TT);
-                setPlatform("tiktok");
-              }}
-            >
-              🎵 1 link TikTok
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              style={{ fontSize: "0.75rem", padding: "0.25rem 0.6rem" }}
-              onClick={() => {
-                setUrlsInput(SAMPLE_SINGLE_FB);
-                setPlatform("facebook");
-              }}
-            >
-              📘 1 link Facebook
-            </button>
-            {urlsInput && (
-              <button
-                type="button"
-                className="btn-secondary"
-                style={{ fontSize: "0.75rem", padding: "0.25rem 0.6rem" }}
-                onClick={() => {
-                  setUrlsInput("");
-                  setBatchStatuses([]);
-                }}
-              >
-                🗑️ Xóa hết
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Options Row */}
+        {/* Subtle Options Bar */}
         <div
           style={{
             display: "flex",
             gap: "1.5rem",
-            marginTop: "0.85rem",
             alignItems: "center",
+            marginTop: "0.85rem",
+            marginBottom: "0.25rem",
             flexWrap: "wrap",
-            padding: "0.75rem 1rem",
-            background: "var(--bg-panel-secondary)",
-            borderRadius: "var(--radius-md)",
-            border: "1px solid var(--border-subtle)",
+            fontSize: "0.85rem",
+            color: "var(--text-muted)",
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <label
-              htmlFor="max-comments-input"
-              style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}
-            >
-              Số bình luận tối đa mỗi link:
+          <div style={{ display: "flex", alignItems: "center", gap: "0.45rem" }}>
+            <label htmlFor="max-comments-input" style={{ fontSize: "0.82rem" }}>
+              Max comments / URL:
             </label>
             <input
               id="max-comments-input"
@@ -777,8 +476,8 @@ export default function CommentsScraper() {
                 )
               }
               style={{
-                width: "80px",
-                padding: "0.3rem 0.5rem",
+                width: "70px",
+                padding: "0.25rem 0.5rem",
                 background: "var(--bg-input)",
                 border: "1px solid var(--border-main)",
                 borderRadius: "var(--radius-sm)",
@@ -794,323 +493,253 @@ export default function CommentsScraper() {
             style={{
               display: "flex",
               alignItems: "center",
-              gap: "0.5rem",
+              gap: "0.45rem",
               cursor: "pointer",
-              fontSize: "0.85rem",
               color: "var(--text-body)",
+              fontSize: "0.82rem",
             }}
           >
             <input
               type="checkbox"
               checked={expandReplies}
               onChange={(e) => setExpandReplies(e.target.checked)}
-              style={{ accentColor: "#10b981", width: "16px", height: "16px" }}
+              style={{ accentColor: "#10b981", width: "15px", height: "15px" }}
             />
-            Cào cả bình luận phản hồi (Sub-comments / Replies)
+            Cào cả bình luận phản hồi (Replies)
           </label>
 
-          {/* Deduplication option for Sentiment Analysis */}
           <label
             style={{
               display: "flex",
               alignItems: "center",
-              gap: "0.5rem",
+              gap: "0.45rem",
               cursor: "pointer",
-              fontSize: "0.85rem",
               color: deduplicate ? "#34d399" : "var(--text-body)",
+              fontSize: "0.82rem",
               fontWeight: deduplicate ? 600 : 400,
             }}
-            title="Loại bỏ các bình luận trùng lặp nội dung hoàn toàn để tránh thiên kiến tập huấn luyện"
+            title="Loại bỏ các bình luận có nội dung trùng lặp"
           >
             <input
               type="checkbox"
               checked={deduplicate}
               onChange={(e) => setDeduplicate(e.target.checked)}
-              style={{ accentColor: "#10b981", width: "16px", height: "16px" }}
+              style={{ accentColor: "#10b981", width: "15px", height: "15px" }}
             />
-            🧹 Loại bỏ bình luận trùng lặp (Deduplicate)
+            Loại bỏ bình luận trùng lặp (Deduplicate)
           </label>
         </div>
 
-        {/* Action Buttons */}
-        <div
-          style={{
-            display: "flex",
-            gap: "1rem",
-            marginTop: "1.25rem",
-            alignItems: "center",
-            flexWrap: "wrap",
-          }}
-        >
-          {!loading ? (
+        {/* Action Row - IDENTICAL to other tabs */}
+        <div className="action-row">
+          <div className="btn-group">
             <button
               id="start-comments-btn"
-              type="button"
               className="btn-primary cmts"
               onClick={handleStartScraping}
-              disabled={parsedUrls.length === 0}
-              style={{
-                padding: "0.65rem 1.75rem",
-                fontSize: "0.95rem",
-                fontWeight: 600,
-                display: "flex",
-                alignItems: "center",
-                gap: "0.5rem",
-              }}
+              disabled={loading || parsedUrls.length === 0}
             >
-              <span>🚀</span> Bắt đầu cào {parsedUrls.length > 0 ? `(${parsedUrls.length} links)` : "bình luận"}
+              {loading ? (
+                <>
+                  <span className="spinner"></span> Scraping (
+                  {completedLinks}/{batchStatuses.length}) ({timer}s)...
+                </>
+              ) : (
+                <>🚀 Start Comments Scraping</>
+              )}
             </button>
-          ) : (
+
+            {loading && (
+              <button
+                id="stop-comments-btn"
+                className="btn-stop"
+                onClick={handleStop}
+              >
+                ⏹ Stop
+              </button>
+            )}
+
+            {!loading && failedLinksCount > 0 && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleRetryFailed}
+                style={{ color: "#f59e0b", borderColor: "#f59e0b" }}
+              >
+                🔄 Retry {failedLinksCount} Failed
+              </button>
+            )}
+
             <button
-              id="stop-comments-btn"
-              type="button"
+              id="load-sample-btn"
               className="btn-secondary"
-              onClick={handleStop}
-              style={{
-                padding: "0.65rem 1.75rem",
-                fontSize: "0.95rem",
-                color: "#f87171",
-                borderColor: "#f87171",
-              }}
+              onClick={handleLoadSample}
+              disabled={loading}
             >
-              ⏹ Dừng lại (Giữ dữ liệu đã cào)
+              📋 Load Sample URLs
             </button>
-          )}
 
-          {/* Retry Failed Links Button */}
-          {!loading && failedLinksCount > 0 && (
             <button
-              type="button"
+              id="clear-input-btn"
+              disabled={loading}
               className="btn-secondary"
-              onClick={handleRetryFailed}
-              style={{
-                padding: "0.65rem 1.25rem",
-                fontSize: "0.9rem",
-                color: "#f59e0b",
-                borderColor: "#f59e0b",
-                background: "rgba(245, 158, 11, 0.12)",
-              }}
+              onClick={handleClear}
             >
-              🔄 Thử lại {failedLinksCount} link lỗi
+              🗑️ Clear
             </button>
-          )}
+          </div>
 
-          {loading && (
-            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-              <span className="spinner" style={{ width: "20px", height: "20px" }} />
-              <span style={{ fontSize: "0.88rem", color: "var(--text-muted)" }}>
-                Đang cào song song ({activeProcessingCount} link đang chạy, {completedLinks}/{batchStatuses.length} xong) — {timer}s...
-              </span>
-            </div>
-          )}
-
-          {!loading && elapsed !== null && (
-            <span
-              style={{
-                fontSize: "0.85rem",
-                color: "#34d399",
-                fontFamily: "var(--font-mono)",
-              }}
-            >
-              ⚡ Đã hoàn tất sau {elapsed}s | Thu thập được{" "}
-              <strong>{results.length}</strong> bình luận
-            </span>
-          )}
-
-          {batchStatuses.length > 0 && (
-            <button
-              type="button"
-              className="btn-secondary"
-              style={{
-                marginLeft: "auto",
-                fontSize: "0.78rem",
-                padding: "0.35rem 0.65rem",
-              }}
-              onClick={() => setShowStatusLog(!showStatusLog)}
-            >
-              {showStatusLog ? "Ẩn chi tiết link ▲" : "Xem chi tiết từng link ▼"}
-            </button>
-          )}
+          <div className="url-counter">
+            Count: <strong>{parsedUrls.length}</strong> URLs
+          </div>
         </div>
 
-        {/* Live Batch Progress Bar */}
+        {/* Live progress bar - IDENTICAL to other tabs */}
         {loading && batchStatuses.length > 0 && (
-          <div className="progress-card" style={{ marginTop: "1rem" }}>
+          <div className="progress-card">
             <div className="progress-header">
               <span className="progress-label">
-                <span className="spinner" style={{ width: "12px", height: "12px" }} />
-                Đang cào đa luồng ({concurrencyMode.toUpperCase()})
+                <span className="spinner"></span>
+                Scraping comments data ({activeProcessingCount} active)...
               </span>
               <span className="progress-counter">
-                {completedLinks} / {batchStatuses.length} ({progressPercent}%)
+                <strong>{completedLinks}</strong> / {batchStatuses.length} (
+                {progressPercent}%)
               </span>
             </div>
             <div className="progress-track">
               <div
-                className="progress-bar"
-                style={{
-                  width: `${progressPercent}%`,
-                  background: "linear-gradient(90deg, #10b981, #06b6d4)",
-                }}
+                className="progress-bar cmts"
+                style={{ width: `${progressPercent}%` }}
               />
             </div>
           </div>
         )}
-
-        {/* Per-URL Breakdown Log */}
-        {showStatusLog && batchStatuses.length > 0 && (
-          <div
-            style={{
-              marginTop: "1rem",
-              padding: "0.85rem 1rem",
-              background: "var(--bg-input)",
-              border: "1px solid var(--border-subtle)",
-              borderRadius: "var(--radius-md)",
-              maxHeight: "240px",
-              overflowY: "auto",
-              fontSize: "0.8rem",
-              fontFamily: "var(--font-mono)",
-            }}
-          >
-            <div style={{ fontWeight: 600, color: "var(--text-muted)", marginBottom: "0.5rem" }}>
-              Tiến trình từng link ({batchStatuses.length}):
-            </div>
-            {batchStatuses.map((st, idx) => (
-              <div
-                key={idx}
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  padding: "0.25rem 0",
-                  borderBottom: "1px dashed #1e293b",
-                  alignItems: "center",
-                  gap: "0.5rem",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  <span>{st.platform === "tiktok" ? "🎵" : st.platform === "facebook" ? "📘" : "❓"}</span>
-                  <span style={{ color: "var(--text-main)" }}>#{idx + 1}:</span>
-                  <span style={{ color: "var(--text-dim)" }}>{st.url}</span>
-                </div>
-                <div style={{ flexShrink: 0 }}>
-                  {st.status === "pending" && <span style={{ color: "var(--text-dim)" }}>Chờ lượt...</span>}
-                  {st.status === "processing" && (
-                    <span style={{ color: "#38bdf8" }}>Đang cào...</span>
-                  )}
-                  {st.status === "success" && (
-                    <span style={{ color: "#34d399" }}>✓ +{st.commentCount} cmt</span>
-                  )}
-                  {st.status === "error" && (
-                    <span style={{ color: "#f87171" }}>✕ {st.error || "Lỗi"}</span>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* General Error Message */}
-        {error && (
-          <div
-            style={{
-              marginTop: "1rem",
-              padding: "0.75rem 1rem",
-              background: "rgba(239, 68, 68, 0.15)",
-              border: "1px solid rgba(239, 68, 68, 0.35)",
-              borderRadius: "var(--radius-md)",
-              color: "#fca5a5",
-              fontSize: "0.88rem",
-            }}
-          >
-            ⚠️ <strong>Lỗi:</strong> {error}
-          </div>
-        )}
       </section>
 
-      {/* Results Section */}
-      {results.length > 0 && (
+      {/* KPI Stats Banner - IDENTICAL to other tabs */}
+      {(results.length > 0 || loading) && (
         <section
-          className="glass-card table-card"
-          style={{ marginTop: "1.5rem" }}
+          className="metrics-grid"
+          aria-label="Performance and Aggregated Metrics"
         >
-          <div className="table-header-bar">
+          <div className="kpi-card">
+            <div className="kpi-icon">💬</div>
             <div>
-              <h3
-                style={{
-                  fontSize: "1.05rem",
-                  fontWeight: 600,
-                  color: "var(--text-main)",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "0.5rem",
-                }}
-              >
-                <span>📊</span> Bảng bình luận ({displayResults.length} dòng
-                {deduplicate && results.length !== displayResults.length ? ` / ${results.length} gốc` : ""})
-              </h3>
-              <p
-                style={{
-                  fontSize: "0.78rem",
-                  color: "var(--text-muted)",
-                  marginTop: "0.15rem",
-                }}
-              >
-                Chuẩn định dạng 2 cột <code>id | Comment</code> phục vụ Multimodal Sentiment Analysis
+              <div className="kpi-val">{displayResults.length.toLocaleString()}</div>
+              <div className="kpi-label">Total Comments Extracted</div>
+            </div>
+          </div>
+
+          <div className="kpi-card">
+            <div className="kpi-icon">📋</div>
+            <div>
+              <div className="kpi-val">
+                {completedSuccessCount} / {batchStatuses.length || parsedUrls.length}
+              </div>
+              <div className="kpi-label">URLs Processed</div>
+            </div>
+          </div>
+
+          <div className="kpi-card">
+            <div className="kpi-icon">⏱️</div>
+            <div>
+              <div className="kpi-val">
+                {elapsed !== null ? elapsed : timer}s
+              </div>
+              <div className="kpi-label">Total Elapsed Time</div>
+            </div>
+          </div>
+
+          <div className="kpi-card">
+            <div className="kpi-icon">✨</div>
+            <div>
+              <div className="kpi-val">
+                {datasetStats ? `${datasetStats.uniquePercent}%` : "100%"}
+              </div>
+              <div className="kpi-label">Unique Comments Rate</div>
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Scraped Results Section - IDENTICAL to other tabs */}
+      {results.length > 0 && (
+        <section className="glass-card" aria-labelledby="results-title">
+          <div className="results-header">
+            <div>
+              <h2 id="results-title" className="card-title">
+                📊 Scraped Comments Data
+              </h2>
+              <p className="card-subtitle">
+                Showing {displayResults.length} of {results.length} comments | 2 Columns: [id | Comment]
+                {deduplicate && results.length > displayResults.length && (
+                  <span style={{ color: "#34d399", marginLeft: "0.5rem" }}>
+                    ({results.length - displayResults.length} duplicates filtered)
+                  </span>
+                )}
               </p>
             </div>
 
             <div className="results-actions">
               <input
+                id="search-input"
                 type="text"
+                placeholder="🔍 Search comments..."
                 className="search-box"
-                placeholder="🔍 Tìm trong bình luận..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
 
               <button
-                type="button"
+                id="copy-table-btn"
+                className="btn-primary cmts"
+                onClick={() => handleCopyTable(false)}
+                style={{ fontWeight: 600 }}
+                title="Copy formatted table (TSV) for Google Sheets, Excel"
+              >
+                {copiedType === "tsv" ? "✅ Copied Table!" : "📋 Copy Table"}
+              </button>
+
+              <button
+                id="copy-headers-btn"
                 className="btn-secondary"
                 onClick={() => handleCopyTable(true)}
-                title="Sao chép dạng bảng TSV để dán trực tiếp vào Google Sheets hoặc Excel"
+                title="Copy table with header row"
               >
-                📋 {copiedType === "tsv" ? "Đã chép!" : "Copy Bảng (TSV)"}
+                {copiedType === "headers" ? "✅ Copied (+Headers)!" : "📋 Copy (+Headers)"}
               </button>
 
               <button
-                type="button"
+                id="copy-json-btn"
                 className="btn-secondary"
                 onClick={handleCopyJson}
-                title="Sao chép mảng JSON để import vào Python/Pandas"
               >
-                {copiedType === "json" ? "Đã chép JSON!" : "Copy JSON"}
+                {copiedType === "json" ? "✅ Copied JSON!" : "Copy JSON"}
               </button>
 
               <button
-                type="button"
+                id="export-jsonl-btn"
                 className="btn-secondary"
                 onClick={handleExportJsonl}
-                title="Xuất file JSONL (.jsonl) chuẩn nạp mô hình NLP / Hugging Face Datasets"
               >
                 📄 JSONL
               </button>
 
               <button
-                type="button"
+                id="export-excel-btn"
                 className="btn-secondary"
                 onClick={handleExportExcel}
-                title="Xuất file bảng tính Excel (.xlsx)"
               >
-                📊 Excel (.xlsx)
+                📊 Excel
               </button>
 
               <button
-                type="button"
-                className="btn-primary cmts"
+                id="export-csv-btn"
+                className="btn-secondary"
                 onClick={handleExportCsv}
-                title="Xuất file CSV mã hóa chuẩn UTF-8 BOM"
               >
-                📥 Xuất CSV
+                📄 CSV
               </button>
             </div>
           </div>
@@ -1122,8 +751,8 @@ export default function CommentsScraper() {
             >
               <thead>
                 <tr>
-                  <th style={{ width: "70px", textAlign: "center" }}>id</th>
-                  <th>Comment</th>
+                  <th style={{ width: "80px", textAlign: "center" }}>ID</th>
+                  <th>COMMENT</th>
                 </tr>
               </thead>
               <tbody>
@@ -1159,42 +788,8 @@ export default function CommentsScraper() {
               </tbody>
             </table>
           </div>
-
-          {/* Dataset Quality & Metadata Summary */}
-          <div
-            style={{
-              padding: "0.75rem 1.25rem",
-              background: "var(--bg-panel-secondary)",
-              borderTop: "1px solid var(--border-subtle)",
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              fontSize: "0.8rem",
-              color: "var(--text-muted)",
-              flexWrap: "wrap",
-              gap: "0.75rem",
-            }}
-          >
-            <span>
-              Hiển thị <strong>{displayResults.length}</strong> /{" "}
-              <strong>{results.length}</strong> bình luận
-              {deduplicate && results.length > displayResults.length && (
-                <span style={{ color: "#34d399", marginLeft: "0.5rem" }}>
-                  (Đã loại bỏ {results.length - displayResults.length} bình luận trùng)
-                </span>
-              )}
-            </span>
-
-            {datasetStats && (
-              <span style={{ display: "flex", gap: "1rem", fontFamily: "var(--font-mono)" }}>
-                <span>Độ dài TB: ~{datasetStats.avgWords} từ/cmt</span>
-                <span>Tỉ lệ duy nhất: {datasetStats.uniquePercent}%</span>
-                <span>Chuẩn format: 2 Columns [id, Comment]</span>
-              </span>
-            )}
-          </div>
         </section>
       )}
-    </div>
+    </>
   );
 }

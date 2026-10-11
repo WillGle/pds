@@ -496,6 +496,10 @@ body {
   background: linear-gradient(90deg, #a21caf, #e879f9);
 }
 
+.progress-bar.cmts {
+  background: linear-gradient(90deg, #10b981, #34d399);
+}
+
 /* Metric KPI Banner */
 .metrics-grid {
   display: grid;
