@@ -7,6 +7,8 @@ export interface CommentRow {
   Comment: string;
 }
 
+type PlatformChoice = "auto" | "facebook" | "tiktok";
+
 interface UrlProcessStatus {
   url: string;
   platform: "facebook" | "tiktok" | "unknown";
@@ -46,6 +48,22 @@ const SAMPLE_URLS = [
   "https://www.facebook.com/reel/1779820026593617",
 ];
 
+const SAMPLE_FB_URLS = [
+  "https://www.facebook.com/reel/1751123646230423",
+  "https://www.facebook.com/reel/1817348789627621",
+  "https://www.facebook.com/reel/1076863841954950",
+  "https://www.facebook.com/reel/2548955998859652",
+  "https://www.facebook.com/reel/1076545181488229",
+];
+
+const SAMPLE_TT_URLS = [
+  "https://www.tiktok.com/@do_toc_do/video/7675974583278685461",
+  "https://www.tiktok.com/@taotentho94/video/7676040678341709063",
+  "https://www.tiktok.com/@maly.gaugau/video/7674580711814335764",
+  "https://www.tiktok.com/@laclac.jj/video/7676080656643935496",
+  "https://www.tiktok.com/@_conlabong/video/7675962028938267911",
+];
+
 export function extractUrls(text: string): string[] {
   if (!text) return [];
   const matches = text.match(/https?:\/\/[^\s)\]"'>]+/gi);
@@ -75,6 +93,7 @@ function cleanCommentText(raw: string): string {
 
 export default function CommentsScraper() {
   const [urlsInput, setUrlsInput] = useState<string>("");
+  const [platform, setPlatform] = useState<PlatformChoice>("auto");
   const [maxCommentsPerUrl, setMaxCommentsPerUrl] = useState<number>(100);
   const [expandReplies, setExpandReplies] = useState<boolean>(true);
   const [deduplicate, setDeduplicate] = useState<boolean>(false);
@@ -85,6 +104,16 @@ export default function CommentsScraper() {
 
   // Batch tracking
   const [batchStatuses, setBatchStatuses] = useState<UrlProcessStatus[]>([]);
+  const [showStatusModal, setShowStatusModal] = useState<boolean>(false);
+
+  // Close modal on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setShowStatusModal(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // Results: strictly [id, Comment]
   const [results, setResults] = useState<CommentRow[]>([]);
@@ -122,12 +151,17 @@ export default function CommentsScraper() {
 
     if (!isRetry) {
       setResults([]);
-      const initialStatuses: UrlProcessStatus[] = urlsToRun.map((u) => ({
-        url: u,
-        platform: detectUrlPlatform(u),
-        status: "pending",
-        commentCount: 0,
-      }));
+      const initialStatuses: UrlProcessStatus[] = urlsToRun.map((u) => {
+        let targetPlat = detectUrlPlatform(u);
+        if (platform === "facebook") targetPlat = "facebook";
+        else if (platform === "tiktok") targetPlat = "tiktok";
+        return {
+          url: u,
+          platform: targetPlat,
+          status: "pending",
+          commentCount: 0,
+        };
+      });
       setBatchStatuses(initialStatuses);
     } else {
       setBatchStatuses((prev) =>
@@ -141,10 +175,15 @@ export default function CommentsScraper() {
 
     const startTime = Date.now();
 
-    const queue = urlsToRun.map((u) => ({
-      url: u,
-      platform: detectUrlPlatform(u),
-    }));
+    const queue = urlsToRun.map((u) => {
+      let targetPlat = detectUrlPlatform(u);
+      if (platform === "facebook") targetPlat = "facebook";
+      else if (platform === "tiktok") targetPlat = "tiktok";
+      return {
+        url: u,
+        platform: targetPlat,
+      };
+    });
 
     let activeTt = 0;
     let activeFb = 0;
@@ -302,7 +341,13 @@ export default function CommentsScraper() {
   };
 
   const handleLoadSample = () => {
-    setUrlsInput(SAMPLE_URLS.join("\n"));
+    if (platform === "facebook") {
+      setUrlsInput(SAMPLE_FB_URLS.join("\n"));
+    } else if (platform === "tiktok") {
+      setUrlsInput(SAMPLE_TT_URLS.join("\n"));
+    } else {
+      setUrlsInput(SAMPLE_URLS.join("\n"));
+    }
   };
 
   const handleClear = () => {
@@ -430,18 +475,92 @@ export default function CommentsScraper() {
               💬 Input Comments URLs
             </h2>
             <p className="card-subtitle">
-              Paste links below (Facebook &amp; TikTok, one per line). Extract all comments into a single continuous 2-column [id | Comment] table ready for Multimodal Sentiment Analysis.
+              Paste links below ({platform === "facebook" ? "Facebook" : platform === "tiktok" ? "TikTok" : "Facebook & TikTok"}, one per line). Extract all comments into a single continuous 2-column [id | Comment] table ready for Multimodal Sentiment Analysis.
             </p>
           </div>
-          <span className="platform-pill cmts">
-            💬 Comments Scraper
-          </span>
+
+          {/* Sleek Segmented Platform Switcher: Auto | FB | TikTok */}
+          <div
+            style={{
+              display: "inline-flex",
+              background: "var(--bg-input)",
+              padding: "3px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border-main)",
+              gap: "2px",
+              alignSelf: "flex-start",
+            }}
+          >
+            <button
+              id="platform-auto-btn"
+              type="button"
+              onClick={() => setPlatform("auto")}
+              style={{
+                padding: "0.35rem 0.85rem",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                borderRadius: "var(--radius-sm)",
+                border: platform === "auto" ? "1px solid #10b981" : "1px solid transparent",
+                background: platform === "auto" ? "rgba(16, 185, 129, 0.18)" : "transparent",
+                color: platform === "auto" ? "#34d399" : "var(--text-muted)",
+                cursor: "pointer",
+                transition: "all 0.15s ease",
+              }}
+              title="Tự động nhận diện link Facebook hoặc TikTok"
+            >
+              🌐 Auto
+            </button>
+            <button
+              id="platform-fb-btn"
+              type="button"
+              onClick={() => setPlatform("facebook")}
+              style={{
+                padding: "0.35rem 0.85rem",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                borderRadius: "var(--radius-sm)",
+                border: platform === "facebook" ? "1px solid #3b82f6" : "1px solid transparent",
+                background: platform === "facebook" ? "rgba(59, 130, 246, 0.18)" : "transparent",
+                color: platform === "facebook" ? "#60a5fa" : "var(--text-muted)",
+                cursor: "pointer",
+                transition: "all 0.15s ease",
+              }}
+              title="Chỉ định cào qua Facebook API"
+            >
+              📘 FB
+            </button>
+            <button
+              id="platform-tiktok-btn"
+              type="button"
+              onClick={() => setPlatform("tiktok")}
+              style={{
+                padding: "0.35rem 0.85rem",
+                fontSize: "0.8rem",
+                fontWeight: 600,
+                borderRadius: "var(--radius-sm)",
+                border: platform === "tiktok" ? "1px solid #f43f5e" : "1px solid transparent",
+                background: platform === "tiktok" ? "rgba(244, 63, 94, 0.18)" : "transparent",
+                color: platform === "tiktok" ? "#fb7185" : "var(--text-muted)",
+                cursor: "pointer",
+                transition: "all 0.15s ease",
+              }}
+              title="Chỉ định cào qua TikTok API"
+            >
+              🎵 TikTok
+            </button>
+          </div>
         </div>
 
         <textarea
           id="comments-urls-input"
           className="input-textarea"
-          placeholder={`https://www.tiktok.com/@do_toc_do/video/7675974583278685461\nhttps://www.facebook.com/reel/1751123646230423`}
+          placeholder={
+            platform === "facebook"
+              ? "https://www.facebook.com/reel/1751123646230423"
+              : platform === "tiktok"
+              ? "https://www.tiktok.com/@do_toc_do/video/7675974583278685461"
+              : "https://www.tiktok.com/@do_toc_do/video/7675974583278685461\nhttps://www.facebook.com/reel/1751123646230423"
+          }
           value={urlsInput}
           onChange={(e) => setUrlsInput(e.target.value)}
         />
@@ -535,7 +654,9 @@ export default function CommentsScraper() {
           <div className="btn-group">
             <button
               id="start-comments-btn"
-              className="btn-primary cmts"
+              className={`btn-primary ${
+                platform === "facebook" ? "fb" : platform === "tiktok" ? "tt" : "cmts"
+              }`}
               onClick={handleStartScraping}
               disabled={loading || parsedUrls.length === 0}
             >
@@ -545,7 +666,9 @@ export default function CommentsScraper() {
                   {completedLinks}/{batchStatuses.length}) ({timer}s)...
                 </>
               ) : (
-                <>🚀 Start Comments Scraping</>
+                <>
+                  🚀 Start {platform === "facebook" ? "Facebook" : platform === "tiktok" ? "TikTok" : "Comments"} Scraping
+                </>
               )}
             </button>
 
@@ -587,6 +710,18 @@ export default function CommentsScraper() {
             >
               🗑️ Clear
             </button>
+
+            {batchStatuses.length > 0 && (
+              <button
+                id="link-details-btn"
+                type="button"
+                className="btn-secondary"
+                onClick={() => setShowStatusModal(true)}
+                title="Xem chi tiết trạng thái từng liên kết trong popup"
+              >
+                📋 Chi tiết từng link ({completedLinks}/{batchStatuses.length})
+              </button>
+            )}
           </div>
 
           <div className="url-counter">
@@ -600,16 +735,35 @@ export default function CommentsScraper() {
             <div className="progress-header">
               <span className="progress-label">
                 <span className="spinner"></span>
-                Scraping comments data ({activeProcessingCount} active)...
+                Scraping {platform === "facebook" ? "Facebook" : platform === "tiktok" ? "TikTok" : "Comments"} data ({activeProcessingCount} active)...
               </span>
-              <span className="progress-counter">
-                <strong>{completedLinks}</strong> / {batchStatuses.length} (
-                {progressPercent}%)
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                <button
+                  type="button"
+                  onClick={() => setShowStatusModal(true)}
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    color: "#38bdf8",
+                    fontSize: "0.8rem",
+                    cursor: "pointer",
+                    textDecoration: "underline",
+                    padding: 0,
+                  }}
+                >
+                  Xem chi tiết link ▼
+                </button>
+                <span className="progress-counter">
+                  <strong>{completedLinks}</strong> / {batchStatuses.length} (
+                  {progressPercent}%)
+                </span>
+              </div>
             </div>
             <div className="progress-track">
               <div
-                className="progress-bar cmts"
+                className={`progress-bar ${
+                  platform === "facebook" ? "fb" : platform === "tiktok" ? "tt" : "cmts"
+                }`}
                 style={{ width: `${progressPercent}%` }}
               />
             </div>
@@ -631,13 +785,22 @@ export default function CommentsScraper() {
             </div>
           </div>
 
-          <div className="kpi-card">
+          <div
+            className="kpi-card"
+            style={{ cursor: batchStatuses.length > 0 ? "pointer" : "default" }}
+            onClick={() => {
+              if (batchStatuses.length > 0) setShowStatusModal(true);
+            }}
+            title={batchStatuses.length > 0 ? "Click để mở popup chi tiết từng link" : ""}
+          >
             <div className="kpi-icon">📋</div>
             <div>
               <div className="kpi-val">
                 {completedSuccessCount} / {batchStatuses.length || parsedUrls.length}
               </div>
-              <div className="kpi-label">URLs Processed</div>
+              <div className="kpi-label">
+                URLs Processed {batchStatuses.length > 0 ? "(Chi tiết ↗)" : ""}
+              </div>
             </div>
           </div>
 
@@ -693,7 +856,9 @@ export default function CommentsScraper() {
 
               <button
                 id="copy-table-btn"
-                className="btn-primary cmts"
+                className={`btn-primary ${
+                  platform === "facebook" ? "fb" : platform === "tiktok" ? "tt" : "cmts"
+                }`}
                 onClick={() => handleCopyTable(false)}
                 style={{ fontWeight: 600 }}
                 title="Copy formatted table (TSV) for Google Sheets, Excel"
@@ -789,6 +954,206 @@ export default function CommentsScraper() {
             </table>
           </div>
         </section>
+      )}
+
+      {/* Detail Status Modal Popup */}
+      {showStatusModal && (
+        <div
+          className="status-modal-backdrop"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0, 0, 0, 0.75)",
+            backdropFilter: "blur(6px)",
+            WebkitBackdropFilter: "blur(6px)",
+            zIndex: 99999,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "1rem",
+          }}
+          onClick={() => setShowStatusModal(false)}
+        >
+          <div
+            className="glass-card"
+            style={{
+              width: "100%",
+              maxWidth: "780px",
+              maxHeight: "85vh",
+              display: "flex",
+              flexDirection: "column",
+              background: "var(--bg-panel)",
+              border: "1px solid var(--border-main)",
+              boxShadow: "0 20px 50px rgba(0, 0, 0, 0.6)",
+              borderRadius: "var(--radius-lg)",
+              padding: "1.25rem 1.5rem",
+              overflow: "hidden",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                paddingBottom: "1rem",
+                borderBottom: "1px solid var(--border-subtle)",
+              }}
+            >
+              <div>
+                <h3
+                  style={{
+                    fontSize: "1.1rem",
+                    fontWeight: 700,
+                    color: "var(--text-main)",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "0.5rem",
+                  }}
+                >
+                  <span>📋</span> Chi tiết trạng thái từng link ({batchStatuses.length})
+                </h3>
+                <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: "0.2rem" }}>
+                  Hoàn tất: <strong style={{ color: "var(--text-main)" }}>{completedLinks}</strong> / {batchStatuses.length} | Thành công: <strong style={{ color: "#34d399" }}>{completedSuccessCount}</strong> | Lỗi: <strong style={{ color: failedLinksCount > 0 ? "#f87171" : "var(--text-muted)" }}>{failedLinksCount}</strong>
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowStatusModal(false)}
+                style={{
+                  background: "#1e293b",
+                  border: "1px solid var(--border-main)",
+                  color: "var(--text-muted)",
+                  width: "32px",
+                  height: "32px",
+                  borderRadius: "50%",
+                  display: "grid",
+                  placeContent: "center",
+                  cursor: "pointer",
+                  fontSize: "1rem",
+                  lineHeight: 1,
+                  transition: "all 0.15s ease",
+                }}
+                title="Đóng cửa sổ"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Modal Scrollable List */}
+            <div
+              style={{
+                overflowY: "auto",
+                padding: "0.75rem 0",
+                flex: 1,
+                fontFamily: "var(--font-mono)",
+                fontSize: "0.82rem",
+              }}
+            >
+              {batchStatuses.map((st, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    padding: "0.5rem 0.5rem",
+                    borderBottom: "1px dashed #1e293b",
+                    gap: "0.75rem",
+                    background: st.status === "processing" ? "rgba(56, 189, 248, 0.05)" : "transparent",
+                    borderRadius: "var(--radius-sm)",
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                      overflow: "hidden",
+                      minWidth: 0,
+                    }}
+                  >
+                    <span>{st.platform === "tiktok" ? "🎵" : st.platform === "facebook" ? "📘" : "❓"}</span>
+                    <span style={{ color: "var(--text-dim)", width: "30px", flexShrink: 0 }}>
+                      #{idx + 1}
+                    </span>
+                    <span
+                      style={{
+                        color: "var(--text-main)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={st.url}
+                    >
+                      {st.url}
+                    </span>
+                  </div>
+
+                  <div style={{ flexShrink: 0 }}>
+                    {st.status === "pending" && (
+                      <span style={{ color: "var(--text-dim)", padding: "0.2rem 0.5rem", background: "#1e293b", borderRadius: "4px" }}>
+                        Chờ lượt...
+                      </span>
+                    )}
+                    {st.status === "processing" && (
+                      <span style={{ color: "#38bdf8", padding: "0.2rem 0.5rem", background: "rgba(56, 189, 248, 0.15)", borderRadius: "4px", display: "inline-flex", alignItems: "center", gap: "0.3rem" }}>
+                        <span className="spinner" style={{ width: "10px", height: "10px" }} /> Đang cào...
+                      </span>
+                    )}
+                    {st.status === "success" && (
+                      <span style={{ color: "#34d399", padding: "0.2rem 0.5rem", background: "rgba(16, 185, 129, 0.15)", borderRadius: "4px" }}>
+                        ✓ +{st.commentCount} cmt
+                      </span>
+                    )}
+                    {st.status === "error" && (
+                      <span style={{ color: "#f87171", padding: "0.2rem 0.5rem", background: "rgba(239, 68, 68, 0.15)", borderRadius: "4px" }}>
+                        ✕ {st.error || "Lỗi"}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Modal Footer */}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                paddingTop: "0.85rem",
+                borderTop: "1px solid var(--border-subtle)",
+              }}
+            >
+              <div>
+                {!loading && failedLinksCount > 0 && (
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      handleRetryFailed();
+                    }}
+                    style={{ color: "#f59e0b", borderColor: "#f59e0b", fontSize: "0.82rem" }}
+                  >
+                    🔄 Thử lại {failedLinksCount} link lỗi
+                  </button>
+                )}
+              </div>
+
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setShowStatusModal(false)}
+                style={{ fontSize: "0.82rem" }}
+              >
+                Đóng cửa sổ
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );
