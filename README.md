@@ -117,7 +117,7 @@ Trích xuất toàn bộ bình luận dưới bài viết (bao gồm cả replie
   2,"A decade of dedication..."
   ```
 
-### 3. TikTok Scraper
+### 3. TikTok Video Scraper
 
 - **Endpoint**: `POST /api/scrape/tiktok`
 - **Body**:
@@ -130,7 +130,46 @@ Trích xuất toàn bộ bình luận dưới bài viết (bao gồm cả replie
   }
   ```
 
-### 3. YouTube Scraper
+### 4. TikTok Comments Scraper (Multimodal Sentiment Analysis)
+
+Trích xuất toàn bộ bình luận dưới video TikTok (bao gồm cả replies) thành bảng chuẩn 2 cột: `id` | `Comment`.
+
+- **Endpoint**: `POST /api/scrape/tiktok/comments` (hoặc `GET /api/scrape/tiktok/comments?url=...&maxComments=100`)
+- **Body**:
+
+  ```json
+  {
+    "url": "https://www.tiktok.com/@hoangnga_home/video/7691183589144202503",
+    "maxComments": 100,
+    "expandReplies": true,
+    "format": "json" // tuỳ chọn: "json" (mặc định) | "csv" | "tsv"
+  }
+  ```
+
+- **Output JSON** (Bảng 2 cột `id` | `Comment`):
+
+  ```json
+  [
+    {
+      "id": 1,
+      "Comment": "giá mấy ạ?"
+    },
+    {
+      "id": 2,
+      "Comment": "Bạn ơi sàn nhà bạn làm gỗ hay sàn gạch vậy"
+    }
+  ]
+  ```
+
+- **Output CSV** (`?format=csv`):
+
+  ```csv
+  id,Comment
+  1,"giá mấy ạ?"
+  2,"Bạn ơi sàn nhà bạn làm gỗ hay sàn gạch vậy"
+  ```
+
+### 5. YouTube Scraper
 
 - **Endpoint**: `POST /api/scrape/youtube`
 - **Body**:
