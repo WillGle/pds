@@ -78,46 +78,43 @@ vercel
   }
   ```
 
-### 2. Facebook Comments Scraper
+### 2. Facebook Comments Scraper (Multimodal Sentiment Analysis)
 
-- **Endpoint**: `POST /api/scrape/facebook/comments` (also supports `GET ?url=...&maxComments=50`)
+Trích xuất toàn bộ bình luận dưới bài viết (bao gồm cả replies) thành bảng chuẩn 2 cột: `id` | `Comment`.
+
+- **Endpoint**: `POST /api/scrape/facebook/comments` (hoặc `GET /api/scrape/facebook/comments?url=...&maxComments=100`)
 - **Body**:
 
   ```json
   {
     "url": "https://www.facebook.com/zuck/posts/pfbid023Anbd22r92VQN9K23DGhd8t6WSK5g8S8cmjKvNogJEYhFQRwHSWdUz6sc5cJjPcYl",
     "maxComments": 100,
-    "expandReplies": true
+    "expandReplies": true,
+    "format": "json" // tuỳ chọn: "json" (mặc định) | "csv" | "tsv"
   }
   ```
-- **Response**:
+
+- **Output JSON** (Bảng 2 cột `id` | `Comment`):
 
   ```json
-  {
-    "success": true,
-    "url": "https://www.facebook.com/...",
-    "total": 37,
-    "comments": [
-      {
-        "id": "1429300778641244",
-        "text": "Ten years of smoking meats!...",
-        "author": "Ayodele Abraham Osijonwo",
-        "time": "7 giờ",
-        "likes": 49,
-        "isReply": false,
-        "replyTo": null
-      },
-      {
-        "id": "1653167209515493",
-        "text": "Ayodele Abraham Osijonwo believe",
-        "author": "Aleruchi Odum",
-        "time": "4 giờ",
-        "likes": null,
-        "isReply": true,
-        "replyTo": "Ayodele Abraham Osijonwo"
-      }
-    ]
-  }
+  [
+    {
+      "id": 1,
+      "Comment": "Ten years of smoking meats! Proof that even in a world of artificial intelligence..."
+    },
+    {
+      "id": 2,
+      "Comment": "A decade of dedication and it shows in every bite and probably smelling like smoke for all 10 years"
+    }
+  ]
+  ```
+
+- **Output CSV** (`?format=csv` - Tải trực tiếp hoặc load vào Pandas):
+
+  ```csv
+  id,Comment
+  1,"Ten years of smoking meats!..."
+  2,"A decade of dedication..."
   ```
 
 ### 3. TikTok Scraper
@@ -146,4 +143,3 @@ vercel
     ]
   }
   ```
-

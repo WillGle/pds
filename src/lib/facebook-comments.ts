@@ -1,21 +1,16 @@
 import chromium from "@sparticuz/chromium";
 import puppeteer, { TimeoutError, type Page, type HTTPRequest } from "puppeteer-core";
 
-export interface FacebookCommentItem {
-  id: string;
-  text: string;
-  author: string;
-  time: string;
-  likes: number | null;
-  isReply: boolean;
-  replyTo?: string | null;
+export interface CommentTableRow {
+  id: number;
+  Comment: string;
 }
 
 export interface FacebookCommentsResult {
   success: boolean;
   url: string;
   total: number;
-  comments: FacebookCommentItem[];
+  data: CommentTableRow[];
   error?: string;
 }
 
@@ -42,7 +37,7 @@ export async function scrapeFacebookComments(
       success: false,
       url: rawUrl,
       total: 0,
-      comments: [],
+      data: [],
       error: "URL cannot be empty",
     };
   }
@@ -120,7 +115,7 @@ export async function scrapeFacebookComments(
       if (!(err instanceof TimeoutError)) throw err;
     }
 
-    // Give DOM a short moment to initialize client components
+    // Give DOM a moment to render client components
     await new Promise((r) => setTimeout(r, 2000));
 
     // Handle initial login dialog without closing the post modal
@@ -128,7 +123,6 @@ export async function scrapeFacebookComments(
       const dialogs = document.querySelectorAll('[role="dialog"]');
       dialogs.forEach((dialog) => {
         const text = (dialog as HTMLElement).innerText || "";
-        // Only remove if it's purely a login wall and not the post itself
         const isLoginWall =
           (text.includes("Xem thêm trên Facebook") || text.includes("Đăng nhập")) &&
           !text.includes("bình luận") &&
@@ -148,7 +142,7 @@ export async function scrapeFacebookComments(
       });
     });
 
-    // If comments are hidden (e.g. on watch/reel view), attempt to click comment trigger button
+    // If comments are hidden, attempt to click comment trigger button
     await page.evaluate(() => {
       const hasComments = document.querySelectorAll('div[role="article"]').length > 1;
       if (!hasComments) {
@@ -211,30 +205,42 @@ export async function scrapeFacebookComments(
       await new Promise((r) => setTimeout(r, 2000));
     }
 
-    // Extract all comments from DOM
+    // Expand truncated comments ("Xem thêm" / "See more" text buttons inside comments)
+    await page.evaluate(() => {
+      const seeMoreButtons = Array.from(
+        document.querySelectorAll<HTMLElement>(
+          'div[role="article"] div[role="button"], div[role="article"] span[role="button"]'
+        )
+      ).filter((b) => /^(?:xem thêm|see more)$/i.test(b.innerText?.trim() || ""));
+      for (const btn of seeMoreButtons) {
+        btn.click();
+      }
+    });
+
+    await new Promise((r) => setTimeout(r, 1000));
+
+    // Extract all comment texts from DOM cleanly for sentiment analysis
     const rawComments = await page.evaluate((limit: number) => {
       const articles = Array.from(document.querySelectorAll<HTMLElement>('div[role="article"]')).filter((a) => {
         const aria = a.getAttribute("aria-label") || "";
         return /bình luận|comment|phản hồi|reply/i.test(aria);
       });
 
-      return articles.slice(0, limit).map((art, index) => {
+      const extracted: string[] = [];
+      const seen = new Set<string>();
+
+      for (const art of articles) {
+        if (extracted.length >= limit) break;
+
         const aria = art.getAttribute("aria-label") || "";
-        const isReply = /phản hồi|reply/i.test(aria);
-
-        // Extract author
-        const authorSpan = art.querySelector('span[dir="auto"]');
-        const author = authorSpan?.textContent?.trim() || "";
-
-        // Extract replyTo if applicable from aria-label
         let replyTo: string | null = null;
-        if (isReply) {
-          const replyMatch = aria.match(/phản hồi bình luận của (.*?) dưới tên/i) ||
-                             aria.match(/reply to (.*?)'s comment by/i);
+        if (/phản hồi|reply/i.test(aria)) {
+          const replyMatch =
+            aria.match(/phản hồi bình luận của (.*?) dưới tên/i) ||
+            aria.match(/reply to (.*?)'s comment by/i);
           if (replyMatch) replyTo = replyMatch[1].trim();
         }
 
-        // Extract comment text: prefer div[dir="auto"] inside the article
         const dirAutos = Array.from(art.querySelectorAll<HTMLElement>('div[dir="auto"]'));
         let text = "";
         if (dirAutos.length > 0) {
@@ -243,63 +249,38 @@ export async function scrapeFacebookComments(
           text = art.innerText?.trim() || "";
         }
 
-        // Extract comment ID and timestamp
-        const timeLink = Array.from(art.querySelectorAll<HTMLAnchorElement>("a")).find((a) => {
-          const href = a.getAttribute("href") || "";
-          return href.includes("comment_id=") || href.includes("reply_comment_id=");
-        });
-        let timeText = timeLink?.textContent?.trim() || "";
-        if (!timeText) {
-          const ariaTimeMatch = aria.match(/(?:vào|at)\s+(.*?)(?:\s+trước|\s+ago)?$/i);
-          if (ariaTimeMatch) timeText = ariaTimeMatch[1].trim();
+        // Clean mention prefix if present at start of reply
+        if (replyTo && text.startsWith(replyTo)) {
+          const stripped = text.slice(replyTo.length).trim();
+          if (stripped) text = stripped;
         }
 
-        const href = timeLink?.href || "";
-        let id = "";
-        const rawIdMatch = href.match(/(?:reply_comment_id|comment_id)=([^&]+)/);
-        if (rawIdMatch) {
-          const val = decodeURIComponent(rawIdMatch[1]);
-          if (/^\d+$/.test(val)) {
-            id = val;
-          } else {
-            try {
-              const decoded = atob(val);
-              const subMatch = decoded.match(/_(\d+)$/);
-              if (subMatch) id = subMatch[1];
-            } catch {
-              // Ignore decoding failure
-            }
-          }
-        }
-        if (!id) id = `cmt_${index + 1}`;
+        // Clean leftover mention tag (e.g., @Name)
+        text = text.replace(/^@\S+\s+/, "").trim();
 
-        // Extract likes / reaction count
-        const fullText = art.innerText || "";
-        const lines = fullText.split("\n").map((l) => l.trim()).filter(Boolean);
-        let likes: number | null = null;
-        for (const line of lines) {
-          if (/^\d+$/.test(line) && line !== timeText && line !== author) {
-            likes = parseInt(line, 10);
-          }
-        }
+        // Skip empty or blank text
+        if (!text) continue;
 
-        return {
-          id,
-          text,
-          author,
-          time: timeText,
-          likes,
-          isReply,
-          replyTo,
-        };
-      });
+        // Skip exact duplicate text within the thread
+        if (seen.has(text)) continue;
+        seen.add(text);
+
+        extracted.push(text);
+      }
+
+      return extracted;
     }, maxComments);
+
+    const rows: CommentTableRow[] = rawComments.map((commentText, index) => ({
+      id: index + 1,
+      Comment: commentText,
+    }));
 
     return {
       success: true,
       url: cleanUrl,
-      total: rawComments.length,
-      comments: rawComments,
+      total: rows.length,
+      data: rows,
     };
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : "Failed to scrape Facebook comments";
@@ -307,7 +288,7 @@ export async function scrapeFacebookComments(
       success: false,
       url: cleanUrl,
       total: 0,
-      comments: [],
+      data: [],
       error: errorMsg,
     };
   } finally {
