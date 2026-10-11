@@ -171,41 +171,47 @@ export async function scrapeTikTokComments(
     if (!successPage) break;
   }
 
-  // 2. Fetch replies (sub-comments) if enabled and within limit
+  // 2. Fetch replies (sub-comments) concurrently in chunks of 4 if enabled and within limit
   if (expandReplies && videoId && Date.now() < deadline - 5000) {
-    for (const parent of commentsToFetchReplies) {
+    const chunkSize = 4;
+    for (let i = 0; i < commentsToFetchReplies.length; i += chunkSize) {
       if (collectedTexts.length >= maxComments || Date.now() >= deadline - 4000) break;
+      const chunk = commentsToFetchReplies.slice(i, i + chunkSize);
 
-      try {
-        const replyUrl = `https://www.tikwm.com/api/comment/reply?video_id=${videoId}&comment_id=${parent.id}&count=50`;
-        const resp = await fetch(replyUrl, {
-          signal: AbortSignal.timeout(Math.max(1000, Math.min(5000, deadline - Date.now()))),
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            Accept: "application/json",
-          },
-          cache: "no-store",
-        });
-
-        if (resp.ok) {
+      const fetchPromises = chunk.map(async (parent) => {
+        try {
+          const replyUrl = `https://www.tikwm.com/api/comment/reply?video_id=${videoId}&comment_id=${parent.id}&count=50`;
+          const resp = await fetch(replyUrl, {
+            signal: AbortSignal.timeout(Math.max(1000, Math.min(4000, deadline - Date.now()))),
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+              Accept: "application/json",
+            },
+            cache: "no-store",
+          });
+          if (!resp.ok) return [];
           const resJson = await resp.json();
-          if (resJson?.code === 0 && resJson.data?.comments) {
-            const replies: RawTikWMComment[] = resJson.data.comments;
-            for (const r of replies) {
-              if (collectedTexts.length >= maxComments) break;
+          return resJson?.code === 0 && resJson.data?.comments ? (resJson.data.comments as RawTikWMComment[]) : [];
+        } catch {
+          return [];
+        }
+      });
 
-              let text = (r.text || "").trim();
-              text = text.replace(/^@\S+\s+/, "").trim();
+      const settled = await Promise.allSettled(fetchPromises);
+      for (const res of settled) {
+        if (res.status === "fulfilled" && Array.isArray(res.value)) {
+          for (const r of res.value) {
+            if (collectedTexts.length >= maxComments) break;
 
-              if (text && !seenTexts.has(text)) {
-                seenTexts.add(text);
-                collectedTexts.push(text);
-              }
+            let text = (r.text || "").trim();
+            text = text.replace(/^@\S+\s+/, "").trim();
+
+            if (text && !seenTexts.has(text)) {
+              seenTexts.add(text);
+              collectedTexts.push(text);
             }
           }
         }
-      } catch {
-        // Continue fetching remaining replies
       }
     }
   }

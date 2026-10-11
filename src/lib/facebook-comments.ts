@@ -25,9 +25,9 @@ export async function scrapeFacebookComments(
   rawUrl: string,
   options: ScrapeCommentsOptions = {}
 ): Promise<FacebookCommentsResult> {
-  const maxComments = Math.min(options.maxComments ?? 100, 300);
+  const maxComments = Math.min(options.maxComments ?? 100, 500);
   const expandReplies = options.expandReplies ?? true;
-  const maxIterations = options.maxIterations ?? 10;
+  const maxIterations = options.maxIterations ?? Math.min(25, Math.max(8, Math.ceil(maxComments / 15)));
   const timeoutMs = options.timeoutMs ?? 50000;
   const deadline = Date.now() + timeoutMs;
 
@@ -89,11 +89,18 @@ export async function scrapeFacebookComments(
       "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
     });
 
-    // Abort heavy media, images, and fonts to maximize speed
+    // Abort heavy media, images, fonts, and external trackers to maximize speed & save Lambda memory
     await page.setRequestInterception(true);
     page.on("request", (req: HTTPRequest) => {
       const type = req.resourceType();
-      if (["image", "media", "font"].includes(type)) {
+      const reqUrl = req.url().toLowerCase();
+      if (
+        ["image", "media", "font"].includes(type) ||
+        reqUrl.includes("google-analytics") ||
+        reqUrl.includes("googletagmanager") ||
+        reqUrl.includes("facebook.com/tr/") ||
+        reqUrl.includes("connect.facebook.net/signals")
+      ) {
         req.abort().catch(() => {});
       } else {
         req.continue().catch(() => {});
@@ -115,8 +122,15 @@ export async function scrapeFacebookComments(
       if (!(err instanceof TimeoutError)) throw err;
     }
 
-    // Give DOM a moment to render client components
-    await new Promise((r) => setTimeout(r, 2000));
+    // Smart wait for initial DOM content (up to 1200ms)
+    const domReadyDeadline = Date.now() + 1200;
+    while (Date.now() < domReadyDeadline) {
+      const hasContent = await page.evaluate(() => {
+        return Boolean(document.querySelector('div[role="article"], [role="dialog"]'));
+      });
+      if (hasContent) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     // Handle initial login dialog without closing the post modal
     await page.evaluate(() => {
@@ -153,7 +167,13 @@ export async function scrapeFacebookComments(
       }
     });
 
-    await new Promise((r) => setTimeout(r, 1500));
+    // Smart wait for comment section (up to 800ms)
+    const commentSectionDeadline = Date.now() + 800;
+    while (Date.now() < commentSectionDeadline) {
+      const articleCount = await page.evaluate(() => document.querySelectorAll('div[role="article"]').length);
+      if (articleCount > 0) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
 
     // Iteratively expand more comments and replies until maxComments or deadline
     for (let iter = 0; iter < maxIterations; iter++) {
@@ -202,7 +222,18 @@ export async function scrapeFacebookComments(
       }, expandReplies);
 
       if (clickedCount === 0) break;
-      await new Promise((r) => setTimeout(r, 2000));
+
+      // Smart wait for new comments to appear (up to 1200ms instead of fixed 2000ms)
+      const pollDeadline = Date.now() + 1200;
+      while (Date.now() < pollDeadline) {
+        const newCount = await page.evaluate(() => {
+          return document.querySelectorAll(
+            'div[role="article"][aria-label*="bình luận" i], div[role="article"][aria-label*="comment" i], div[role="article"][aria-label*="phản hồi" i], div[role="article"][aria-label*="reply" i]'
+          ).length;
+        });
+        if (newCount > currentCount) break;
+        await new Promise((r) => setTimeout(r, 120));
+      }
     }
 
     // Expand truncated comments ("Xem thêm" / "See more" text buttons inside comments)
@@ -217,7 +248,7 @@ export async function scrapeFacebookComments(
       }
     });
 
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => setTimeout(r, 400));
 
     // Extract all comment texts from DOM cleanly for sentiment analysis
     const rawComments = await page.evaluate((limit: number) => {

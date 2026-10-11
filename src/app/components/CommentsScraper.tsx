@@ -8,6 +8,7 @@ export interface CommentRow {
 }
 
 type PlatformChoice = "auto" | "facebook" | "tiktok";
+type ConcurrencyMode = "fast" | "turbo" | "sequential";
 
 interface UrlProcessStatus {
   url: string;
@@ -74,11 +75,26 @@ function detectUrlPlatform(url: string): "facebook" | "tiktok" | "unknown" {
   return "unknown";
 }
 
+/**
+ * Clean & normalize comment text for NLP Sentiment Analysis
+ */
+function cleanCommentText(raw: string): string {
+  if (!raw) return "";
+  // Strip zero-width spaces and control chars
+  let text = raw.replace(/[\u200B-\u200D\uFEFF]/g, "");
+  // Normalize carriage returns and multiple consecutive blank lines
+  text = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  return text.trim();
+}
+
 export default function CommentsScraper() {
   const [urlsInput, setUrlsInput] = useState<string>("");
   const [platform, setPlatform] = useState<PlatformChoice>("auto");
   const [maxCommentsPerUrl, setMaxCommentsPerUrl] = useState<number>(100);
   const [expandReplies, setExpandReplies] = useState<boolean>(true);
+  const [concurrencyMode, setConcurrencyMode] = useState<ConcurrencyMode>("fast");
+  const [deduplicate, setDeduplicate] = useState<boolean>(false);
 
   const [loading, setLoading] = useState(false);
   const [timer, setTimer] = useState(0);
@@ -86,7 +102,6 @@ export default function CommentsScraper() {
   const [error, setError] = useState<string | null>(null);
 
   // Batch progress tracking
-  const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [batchStatuses, setBatchStatuses] = useState<UrlProcessStatus[]>([]);
   const [showStatusLog, setShowStatusLog] = useState<boolean>(false);
 
@@ -125,9 +140,21 @@ export default function CommentsScraper() {
     return { fbCount, ttCount, otherCount, total: parsedUrls.length };
   }, [parsedUrls]);
 
-  // Sequential batch scraping
-  const handleStartScraping = async () => {
-    if (parsedUrls.length === 0) {
+  // Concurrency Limits based on mode
+  const { maxTikTokWorkers, maxFacebookWorkers } = useMemo(() => {
+    if (concurrencyMode === "turbo") {
+      return { maxTikTokWorkers: 5, maxFacebookWorkers: 2 };
+    }
+    if (concurrencyMode === "sequential") {
+      return { maxTikTokWorkers: 1, maxFacebookWorkers: 1 };
+    }
+    // "fast" default
+    return { maxTikTokWorkers: 3, maxFacebookWorkers: 2 };
+  }, [concurrencyMode]);
+
+  // Worker Pool Batch Execution (Adaptive Concurrency)
+  const runBatchScraping = async (urlsToRun: string[], isRetry = false) => {
+    if (urlsToRun.length === 0) {
       setError("Vui lòng nhập hoặc dán ít nhất 1 link bài viết Facebook hoặc TikTok.");
       return;
     }
@@ -136,133 +163,197 @@ export default function CommentsScraper() {
     setError(null);
     setTimer(0);
     setElapsed(null);
-    setResults([]);
-    setCurrentIndex(0);
     abortRef.current = false;
 
-    // Initialize statuses for all URLs
-    const initialStatuses: UrlProcessStatus[] = parsedUrls.map((u) => {
-      let targetPlat: "facebook" | "tiktok" | "unknown" = detectUrlPlatform(u);
-      if (platform === "facebook") targetPlat = "facebook";
-      else if (platform === "tiktok") targetPlat = "tiktok";
-      return {
-        url: u,
-        platform: targetPlat,
-        status: "pending",
-        commentCount: 0,
-      };
-    });
-    setBatchStatuses(initialStatuses);
+    if (!isRetry) {
+      setResults([]);
+      const initialStatuses: UrlProcessStatus[] = urlsToRun.map((u) => {
+        let targetPlat = detectUrlPlatform(u);
+        if (platform === "facebook") targetPlat = "facebook";
+        else if (platform === "tiktok") targetPlat = "tiktok";
+        return {
+          url: u,
+          platform: targetPlat,
+          status: "pending",
+          commentCount: 0,
+        };
+      });
+      setBatchStatuses(initialStatuses);
+    } else {
+      // Mark retrying urls as pending
+      setBatchStatuses((prev) =>
+        prev.map((item) =>
+          urlsToRun.includes(item.url)
+            ? { ...item, status: "pending", error: undefined }
+            : item
+        )
+      );
+    }
 
     const startTime = Date.now();
-    let accumulatedComments: CommentRow[] = [];
 
-    try {
-      for (let i = 0; i < parsedUrls.length; i++) {
-        if (abortRef.current) {
-          break;
-        }
+    // Map each url to its status index
+    const queue = urlsToRun.map((u) => {
+      let targetPlat = detectUrlPlatform(u);
+      if (platform === "facebook") targetPlat = "facebook";
+      else if (platform === "tiktok") targetPlat = "tiktok";
+      return { url: u, platform: targetPlat };
+    });
 
-        const currentUrl = parsedUrls[i];
-        setCurrentIndex(i);
+    let activeTt = 0;
+    let activeFb = 0;
+    let queueIdx = 0;
 
-        const targetPlat = initialStatuses[i].platform;
-        if (targetPlat === "unknown") {
-          // Update status as error
-          setBatchStatuses((prev) =>
-            prev.map((item, idx) =>
-              idx === i
-                ? {
-                    ...item,
-                    status: "error",
-                    error: "Không nhận diện được nền tảng (cần link Facebook hoặc TikTok)",
-                  }
-                : item
-            )
-          );
-          continue;
-        }
+    const executeLink = async (item: { url: string; platform: "facebook" | "tiktok" | "unknown" }) => {
+      const { url: currentUrl, platform: targetPlat } = item;
 
-        // Mark as processing
+      // Update status to processing
+      setBatchStatuses((prev) =>
+        prev.map((s) => (s.url === currentUrl ? { ...s, status: "processing" } : s))
+      );
+
+      if (targetPlat === "unknown") {
         setBatchStatuses((prev) =>
-          prev.map((item, idx) =>
-            idx === i ? { ...item, status: "processing" } : item
+          prev.map((s) =>
+            s.url === currentUrl
+              ? { ...s, status: "error", error: "Không nhận diện được nền tảng" }
+              : s
           )
         );
+        return;
+      }
 
-        const endpoint =
-          targetPlat === "facebook"
-            ? "/api/scrape/facebook/comments"
-            : "/api/scrape/tiktok/comments";
+      const endpoint =
+        targetPlat === "facebook"
+          ? "/api/scrape/facebook/comments"
+          : "/api/scrape/tiktok/comments";
 
-        try {
-          const res = await fetch(endpoint, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              url: currentUrl,
-              maxComments: maxCommentsPerUrl,
-              expandReplies,
-            }),
-          });
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: currentUrl,
+            maxComments: maxCommentsPerUrl,
+            expandReplies,
+          }),
+        });
 
-          const data = await res.json();
+        const data = await res.json();
 
-          if (abortRef.current) {
+        if (abortRef.current) return;
+
+        if (!res.ok || data.error) {
+          const errDetail = data.error || `HTTP ${res.status}`;
+          setBatchStatuses((prev) =>
+            prev.map((s) =>
+              s.url === currentUrl ? { ...s, status: "error", error: errDetail } : s
+            )
+          );
+          return;
+        }
+
+        const incomingRows: CommentRow[] = Array.isArray(data)
+          ? data
+          : Array.isArray(data.data)
+          ? data.data
+          : [];
+
+        // Clean & normalize comment texts
+        const cleanedComments = incomingRows
+          .map((r) => cleanCommentText(r.Comment))
+          .filter(Boolean);
+
+        // Append to results with monotonically increasing ID
+        setResults((prev) => {
+          const baseId = prev.length;
+          const newRows: CommentRow[] = cleanedComments.map((text, idx) => ({
+            id: baseId + idx + 1,
+            Comment: text,
+          }));
+          return [...prev, ...newRows];
+        });
+
+        setBatchStatuses((prev) =>
+          prev.map((s) =>
+            s.url === currentUrl
+              ? { ...s, status: "success", commentCount: cleanedComments.length }
+              : s
+          )
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Lỗi kết nối";
+        setBatchStatuses((prev) =>
+          prev.map((s) =>
+            s.url === currentUrl ? { ...s, status: "error", error: msg } : s
+          )
+        );
+      }
+    };
+
+    // Worker dispatcher loop
+    await new Promise<void>((resolve) => {
+      const scheduleNext = () => {
+        if (abortRef.current) {
+          if (activeTt === 0 && activeFb === 0) resolve();
+          return;
+        }
+
+        // Try to dispatch tasks as long as slots are available
+        while (queueIdx < queue.length) {
+          const nextItem = queue[queueIdx];
+          const isTt = nextItem.platform === "tiktok";
+          const isFb = nextItem.platform === "facebook";
+
+          if (isTt && activeTt < maxTikTokWorkers) {
+            activeTt++;
+            queueIdx++;
+            executeLink(nextItem).finally(() => {
+              activeTt--;
+              scheduleNext();
+            });
+          } else if (isFb && activeFb < maxFacebookWorkers) {
+            activeFb++;
+            queueIdx++;
+            executeLink(nextItem).finally(() => {
+              activeFb--;
+              scheduleNext();
+            });
+          } else if (!isTt && !isFb) {
+            // Unknown platform, fast-fail
+            queueIdx++;
+            executeLink(nextItem).finally(() => {
+              scheduleNext();
+            });
+          } else {
+            // All workers busy for this platform
             break;
           }
-
-          if (!res.ok || data.error) {
-            const errDetail = data.error || `HTTP ${res.status}`;
-            setBatchStatuses((prev) =>
-              prev.map((item, idx) =>
-                idx === i
-                  ? { ...item, status: "error", error: errDetail }
-                  : item
-              )
-            );
-            continue;
-          }
-
-          // Format rows into continuous sequential table
-          const incomingRows: CommentRow[] = Array.isArray(data)
-            ? data
-            : Array.isArray(data.data)
-            ? data.data
-            : [];
-
-          const currentBaseId = accumulatedComments.length;
-          const reindexedRows: CommentRow[] = incomingRows.map((item, itemIdx) => ({
-            id: currentBaseId + itemIdx + 1,
-            Comment: item.Comment,
-          }));
-
-          accumulatedComments = [...accumulatedComments, ...reindexedRows];
-          setResults(accumulatedComments);
-
-          setBatchStatuses((prev) =>
-            prev.map((item, idx) =>
-              idx === i
-                ? {
-                    ...item,
-                    status: "success",
-                    commentCount: reindexedRows.length,
-                  }
-                : item
-            )
-          );
-        } catch (linkErr: unknown) {
-          const msg = linkErr instanceof Error ? linkErr.message : "Lỗi kết nối";
-          setBatchStatuses((prev) =>
-            prev.map((item, idx) =>
-              idx === i ? { ...item, status: "error", error: msg } : item
-            )
-          );
         }
-      }
-    } finally {
-      setLoading(false);
-      setElapsed(+((Date.now() - startTime) / 1000).toFixed(2));
+
+        // Check completion condition
+        if (queueIdx >= queue.length && activeTt === 0 && activeFb === 0) {
+          resolve();
+        }
+      };
+
+      scheduleNext();
+    });
+
+    setLoading(false);
+    setElapsed(+((Date.now() - startTime) / 1000).toFixed(2));
+  };
+
+  const handleStartScraping = () => {
+    runBatchScraping(parsedUrls, false);
+  };
+
+  const handleRetryFailed = () => {
+    const failedUrls = batchStatuses
+      .filter((s) => s.status === "error")
+      .map((s) => s.url);
+    if (failedUrls.length > 0) {
+      runBatchScraping(failedUrls, true);
     }
   };
 
@@ -271,23 +362,56 @@ export default function CommentsScraper() {
     setLoading(false);
   };
 
-  // Filtered comments for search
-  const filteredResults = useMemo(() => {
-    if (!searchQuery.trim()) return results;
-    const query = searchQuery.trim().toLowerCase();
-    return results.filter(
-      (item) =>
-        item.Comment.toLowerCase().includes(query) ||
-        String(item.id).includes(query)
+  // Filtered & deduplicated comments for view & export
+  const displayResults = useMemo(() => {
+    let list = results;
+
+    // Optional deduplication
+    if (deduplicate) {
+      const seen = new Set<string>();
+      const deduped: CommentRow[] = [];
+      for (const item of list) {
+        const norm = item.Comment.toLowerCase().trim();
+        if (!seen.has(norm)) {
+          seen.add(norm);
+          deduped.push({ id: deduped.length + 1, Comment: item.Comment });
+        }
+      }
+      list = deduped;
+    }
+
+    // Search query filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.trim().toLowerCase();
+      list = list.filter(
+        (item) =>
+          item.Comment.toLowerCase().includes(query) ||
+          String(item.id).includes(query)
+      );
+    }
+
+    return list;
+  }, [results, deduplicate, searchQuery]);
+
+  // Sentiment Dataset Quick Stats
+  const datasetStats = useMemo(() => {
+    if (results.length === 0) return null;
+    const totalWords = results.reduce(
+      (acc, r) => acc + (r.Comment.split(/\s+/).filter(Boolean).length || 1),
+      0
     );
-  }, [results, searchQuery]);
+    const avgWords = Math.round(totalWords / results.length);
+    const uniqueSet = new Set(results.map((r) => r.Comment.toLowerCase().trim()));
+    const uniquePercent = Math.round((uniqueSet.size / results.length) * 100);
+    return { avgWords, uniqueCount: uniqueSet.size, uniquePercent };
+  }, [results]);
 
   // Export handlers
   const handleExportCsv = () => {
-    if (results.length === 0) return;
+    if (displayResults.length === 0) return;
     const bom = "\uFEFF";
     const header = "id,Comment\n";
-    const body = results
+    const body = displayResults
       .map((r) => `${r.id},"${r.Comment.replace(/"/g, '""')}"`)
       .join("\n");
     const blob = new Blob([bom + header + body], {
@@ -295,27 +419,39 @@ export default function CommentsScraper() {
     });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `sentiment_comments_${results.length}_rows.csv`;
+    link.download = `sentiment_comments_${displayResults.length}_rows.csv`;
     link.click();
   };
 
   const handleExportExcel = async () => {
-    if (results.length === 0) return;
+    if (displayResults.length === 0) return;
     try {
       const XLSX = await import("xlsx");
-      const worksheet = XLSX.utils.json_to_sheet(results);
+      const worksheet = XLSX.utils.json_to_sheet(displayResults);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, "Comments");
-      XLSX.writeFile(workbook, `sentiment_comments_${results.length}_rows.xlsx`);
+      XLSX.writeFile(workbook, `sentiment_comments_${displayResults.length}_rows.xlsx`);
     } catch (e) {
       console.error("Export Excel error:", e);
     }
   };
 
+  const handleExportJsonl = () => {
+    if (displayResults.length === 0) return;
+    const jsonl = displayResults
+      .map((r) => JSON.stringify({ id: r.id, Comment: r.Comment }))
+      .join("\n");
+    const blob = new Blob([jsonl], { type: "application/x-ndjson;charset=utf-8;" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `sentiment_dataset_${displayResults.length}.jsonl`;
+    link.click();
+  };
+
   const handleCopyTable = (includeHeader = true) => {
-    if (results.length === 0) return;
+    if (displayResults.length === 0) return;
     const header = includeHeader ? "id\tComment\n" : "";
-    const body = results
+    const body = displayResults
       .map((r) => `${r.id}\t${r.Comment.replace(/[\r\n\t]+/g, " ")}`)
       .join("\n");
     navigator.clipboard.writeText(header + body);
@@ -324,8 +460,8 @@ export default function CommentsScraper() {
   };
 
   const handleCopyJson = () => {
-    if (results.length === 0) return;
-    navigator.clipboard.writeText(JSON.stringify(results, null, 2));
+    if (displayResults.length === 0) return;
+    navigator.clipboard.writeText(JSON.stringify(displayResults, null, 2));
     setCopiedType("json");
     setTimeout(() => setCopiedType(null), 2000);
   };
@@ -334,9 +470,11 @@ export default function CommentsScraper() {
   const completedLinks = batchStatuses.filter(
     (s) => s.status === "success" || s.status === "error"
   ).length;
+  const failedLinksCount = batchStatuses.filter((s) => s.status === "error").length;
+  const activeProcessingCount = batchStatuses.filter((s) => s.status === "processing").length;
   const progressPercent =
-    parsedUrls.length > 0
-      ? Math.round((completedLinks / parsedUrls.length) * 100)
+    batchStatuses.length > 0
+      ? Math.round((completedLinks / batchStatuses.length) * 100)
       : 0;
 
   return (
@@ -346,10 +484,10 @@ export default function CommentsScraper() {
         <div className="section-header-row">
           <div>
             <h2 id="comments-input-title" className="card-title">
-              💬 Multimodal Sentiment Comments Scraper (Batch Mode)
+              💬 Multimodal Sentiment Comments Scraper (Ultra-Fast Batch Mode)
             </h2>
             <p className="card-subtitle">
-              Hỗ trợ dán đồng thời nhiều link Facebook &amp; TikTok (mỗi dòng 1 link hoặc dạng markdown). Toàn bộ bình luận sẽ được tổng hợp vào <strong>1 bảng duy nhất với 2 cột [id | Comment]</strong> phục vụ huấn luyện mô hình phân tích cảm xúc đa phương thái.
+              Cào đồng thời hàng loạt liên kết Facebook &amp; TikTok với cơ chế <strong>Đa luồng song song (Adaptive Concurrency)</strong>. Toàn bộ bình luận được gộp vào <strong>1 bảng duy nhất [id | Comment]</strong> phục vụ huấn luyện và đánh giá mô hình Sentiment Analysis.
             </p>
           </div>
           <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
@@ -358,80 +496,121 @@ export default function CommentsScraper() {
                 ? "📘 Facebook Only"
                 : platform === "tiktok"
                 ? "🎵 TikTok Only"
-                : "🌐 Tự động nhận diện (Hỗn hợp FB & TikTok)"}
+                : "🌐 Tự động nhận diện (Hỗn hợp)"}
             </span>
           </div>
         </div>
 
-        {/* Platform Selection */}
+        {/* Speed & Platform Selection Toolbar */}
         <div
           style={{
             display: "flex",
-            gap: "0.5rem",
+            gap: "1.25rem",
             margin: "0.75rem 0",
             flexWrap: "wrap",
             alignItems: "center",
           }}
         >
-          <span
-            style={{
-              fontSize: "0.85rem",
-              color: "var(--text-muted)",
-              fontWeight: 500,
-            }}
-          >
-            Chế độ nhận diện:
-          </span>
-          <button
-            type="button"
-            className={`btn-secondary ${platform === "auto" ? "active" : ""}`}
-            style={{
-              padding: "0.35rem 0.75rem",
-              fontSize: "0.82rem",
-              background: platform === "auto" ? "#1e293b" : "transparent",
-              borderColor: platform === "auto" ? "#10b981" : "var(--border-main)",
-              color: platform === "auto" ? "#34d399" : "var(--text-body)",
-            }}
-            onClick={() => setPlatform("auto")}
-          >
-            🌐 Tự động theo từng link (Khuyên dùng)
-          </button>
-          <button
-            type="button"
-            className={`btn-secondary ${platform === "facebook" ? "active" : ""}`}
-            style={{
-              padding: "0.35rem 0.75rem",
-              fontSize: "0.82rem",
-              background:
-                platform === "facebook"
-                  ? "rgba(59, 130, 246, 0.15)"
-                  : "transparent",
-              borderColor:
-                platform === "facebook" ? "#3b82f6" : "var(--border-main)",
-              color: platform === "facebook" ? "#60a5fa" : "var(--text-body)",
-            }}
-            onClick={() => setPlatform("facebook")}
-          >
-            📘 Ép Facebook
-          </button>
-          <button
-            type="button"
-            className={`btn-secondary ${platform === "tiktok" ? "active" : ""}`}
-            style={{
-              padding: "0.35rem 0.75rem",
-              fontSize: "0.82rem",
-              background:
-                platform === "tiktok"
-                  ? "rgba(244, 63, 94, 0.15)"
-                  : "transparent",
-              borderColor:
-                platform === "tiktok" ? "#f43f5e" : "var(--border-main)",
-              color: platform === "tiktok" ? "#fb7185" : "var(--text-body)",
-            }}
-            onClick={() => setPlatform("tiktok")}
-          >
-            🎵 Ép TikTok
-          </button>
+          {/* Platform selector */}
+          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+            <span style={{ fontSize: "0.82rem", color: "var(--text-muted)", fontWeight: 500 }}>
+              Nền tảng:
+            </span>
+            <button
+              type="button"
+              className={`btn-secondary ${platform === "auto" ? "active" : ""}`}
+              style={{
+                padding: "0.3rem 0.65rem",
+                fontSize: "0.78rem",
+                background: platform === "auto" ? "#1e293b" : "transparent",
+                borderColor: platform === "auto" ? "#10b981" : "var(--border-main)",
+                color: platform === "auto" ? "#34d399" : "var(--text-body)",
+              }}
+              onClick={() => setPlatform("auto")}
+            >
+              🌐 Tự động
+            </button>
+            <button
+              type="button"
+              className={`btn-secondary ${platform === "facebook" ? "active" : ""}`}
+              style={{
+                padding: "0.3rem 0.65rem",
+                fontSize: "0.78rem",
+                background: platform === "facebook" ? "rgba(59, 130, 246, 0.15)" : "transparent",
+                borderColor: platform === "facebook" ? "#3b82f6" : "var(--border-main)",
+                color: platform === "facebook" ? "#60a5fa" : "var(--text-body)",
+              }}
+              onClick={() => setPlatform("facebook")}
+            >
+              📘 Facebook
+            </button>
+            <button
+              type="button"
+              className={`btn-secondary ${platform === "tiktok" ? "active" : ""}`}
+              style={{
+                padding: "0.3rem 0.65rem",
+                fontSize: "0.78rem",
+                background: platform === "tiktok" ? "rgba(244, 63, 94, 0.15)" : "transparent",
+                borderColor: platform === "tiktok" ? "#f43f5e" : "var(--border-main)",
+                color: platform === "tiktok" ? "#fb7185" : "var(--text-body)",
+              }}
+              onClick={() => setPlatform("tiktok")}
+            >
+              🎵 TikTok
+            </button>
+          </div>
+
+          {/* Concurrency Speed Mode */}
+          <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+            <span style={{ fontSize: "0.82rem", color: "var(--text-muted)", fontWeight: 500 }}>
+              ⚡ Tốc độ cào:
+            </span>
+            <button
+              type="button"
+              className={`btn-secondary ${concurrencyMode === "fast" ? "active" : ""}`}
+              style={{
+                padding: "0.3rem 0.65rem",
+                fontSize: "0.78rem",
+                background: concurrencyMode === "fast" ? "rgba(16, 185, 129, 0.15)" : "transparent",
+                borderColor: concurrencyMode === "fast" ? "#10b981" : "var(--border-main)",
+                color: concurrencyMode === "fast" ? "#34d399" : "var(--text-body)",
+              }}
+              onClick={() => setConcurrencyMode("fast")}
+              title="Chạy song song 3 luồng TikTok, 2 luồng Facebook (Cân bằng tốt nhất)"
+            >
+              ⚡ Nhanh (Song song x3 TT, x2 FB)
+            </button>
+            <button
+              type="button"
+              className={`btn-secondary ${concurrencyMode === "turbo" ? "active" : ""}`}
+              style={{
+                padding: "0.3rem 0.65rem",
+                fontSize: "0.78rem",
+                background: concurrencyMode === "turbo" ? "rgba(14, 165, 233, 0.15)" : "transparent",
+                borderColor: concurrencyMode === "turbo" ? "#0ea5e9" : "var(--border-main)",
+                color: concurrencyMode === "turbo" ? "#38bdf8" : "var(--text-body)",
+              }}
+              onClick={() => setConcurrencyMode("turbo")}
+              title="Chạy song song 5 luồng TikTok, 2 luồng Facebook (Tối đa tốc độ)"
+            >
+              🚀 Siêu tốc (x5 TT, x2 FB)
+            </button>
+            <button
+              type="button"
+              className={`btn-secondary ${concurrencyMode === "sequential" ? "active" : ""}`}
+              style={{
+                padding: "0.3rem 0.65rem",
+                fontSize: "0.78rem",
+                background: concurrencyMode === "sequential" ? "#1e293b" : "transparent",
+                borderColor: concurrencyMode === "sequential" ? "#64748b" : "var(--border-main)",
+                color: concurrencyMode === "sequential" ? "#94a3b8" : "var(--text-body)",
+              }}
+              onClick={() => setConcurrencyMode("sequential")}
+              title="Chạy tuần tự 1 link tại một thời điểm (Tiết kiệm RAM nhất)"
+            >
+              🛡️ Tuần tự (1-by-1)
+            </button>
+          </div>
         </div>
 
         {/* URLs Textarea Input */}
@@ -443,7 +622,7 @@ export default function CommentsScraper() {
             style={{ minHeight: "150px" }}
             value={urlsInput}
             onChange={(e) => setUrlsInput(e.target.value)}
-            placeholder={`Dán danh sách các link Facebook & TikTok tại đây (hỗ trợ nhiều link cùng lúc, cách nhau bằng dấu xuống dòng hoặc khoảng trắng, hoặc định dạng markdown [url](url))...\nVí dụ:\nhttps://www.tiktok.com/@do_toc_do/video/7675974583278685461\nhttps://www.facebook.com/reel/1751123646230423`}
+            placeholder={`Dán danh sách các link Facebook & TikTok tại đây (hỗ trợ nhiều link cùng lúc, mỗi dòng 1 link hoặc dạng markdown [url](url))...\nVí dụ:\nhttps://www.tiktok.com/@do_toc_do/video/7675974583278685461\nhttps://www.facebook.com/reel/1751123646230423`}
           />
         </div>
 
@@ -521,7 +700,7 @@ export default function CommentsScraper() {
                 setUrlsInput(USER_SAMPLE_URLS.join("\n"));
                 setPlatform("auto");
               }}
-              title="Tải toàn bộ 28 link mẫu (18 TikTok + 10 Facebook) theo yêu cầu của bạn"
+              title="Tải toàn bộ 28 link mẫu (18 TikTok + 10 Facebook)"
             >
               📋 Mẫu 28 links của bạn (18 TT + 10 FB)
             </button>
@@ -628,6 +807,28 @@ export default function CommentsScraper() {
             />
             Cào cả bình luận phản hồi (Sub-comments / Replies)
           </label>
+
+          {/* Deduplication option for Sentiment Analysis */}
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "0.5rem",
+              cursor: "pointer",
+              fontSize: "0.85rem",
+              color: deduplicate ? "#34d399" : "var(--text-body)",
+              fontWeight: deduplicate ? 600 : 400,
+            }}
+            title="Loại bỏ các bình luận trùng lặp nội dung hoàn toàn để tránh thiên kiến tập huấn luyện"
+          >
+            <input
+              type="checkbox"
+              checked={deduplicate}
+              onChange={(e) => setDeduplicate(e.target.checked)}
+              style={{ accentColor: "#10b981", width: "16px", height: "16px" }}
+            />
+            🧹 Loại bỏ bình luận trùng lặp (Deduplicate)
+          </label>
         </div>
 
         {/* Action Buttons */}
@@ -675,11 +876,29 @@ export default function CommentsScraper() {
             </button>
           )}
 
+          {/* Retry Failed Links Button */}
+          {!loading && failedLinksCount > 0 && (
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={handleRetryFailed}
+              style={{
+                padding: "0.65rem 1.25rem",
+                fontSize: "0.9rem",
+                color: "#f59e0b",
+                borderColor: "#f59e0b",
+                background: "rgba(245, 158, 11, 0.12)",
+              }}
+            >
+              🔄 Thử lại {failedLinksCount} link lỗi
+            </button>
+          )}
+
           {loading && (
             <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
               <span className="spinner" style={{ width: "20px", height: "20px" }} />
               <span style={{ fontSize: "0.88rem", color: "var(--text-muted)" }}>
-                Đang xử lý link <strong>{currentIndex + 1}</strong>/{parsedUrls.length} ({timer}s)...
+                Đang cào song song ({activeProcessingCount} link đang chạy, {completedLinks}/{batchStatuses.length} xong) — {timer}s...
               </span>
             </div>
           )}
@@ -714,15 +933,15 @@ export default function CommentsScraper() {
         </div>
 
         {/* Live Batch Progress Bar */}
-        {loading && parsedUrls.length > 0 && (
+        {loading && batchStatuses.length > 0 && (
           <div className="progress-card" style={{ marginTop: "1rem" }}>
             <div className="progress-header">
               <span className="progress-label">
                 <span className="spinner" style={{ width: "12px", height: "12px" }} />
-                Đang cào: {parsedUrls[currentIndex]}
+                Đang cào đa luồng ({concurrencyMode.toUpperCase()})
               </span>
               <span className="progress-counter">
-                {completedLinks} / {parsedUrls.length} ({progressPercent}%)
+                {completedLinks} / {batchStatuses.length} ({progressPercent}%)
               </span>
             </div>
             <div className="progress-track">
@@ -746,14 +965,14 @@ export default function CommentsScraper() {
               background: "var(--bg-input)",
               border: "1px solid var(--border-subtle)",
               borderRadius: "var(--radius-md)",
-              maxHeight: "220px",
+              maxHeight: "240px",
               overflowY: "auto",
               fontSize: "0.8rem",
               fontFamily: "var(--font-mono)",
             }}
           >
             <div style={{ fontWeight: 600, color: "var(--text-muted)", marginBottom: "0.5rem" }}>
-              Chi tiết tiến trình từng link ({batchStatuses.length}):
+              Tiến trình từng link ({batchStatuses.length}):
             </div>
             {batchStatuses.map((st, idx) => (
               <div
@@ -773,7 +992,7 @@ export default function CommentsScraper() {
                   <span style={{ color: "var(--text-dim)" }}>{st.url}</span>
                 </div>
                 <div style={{ flexShrink: 0 }}>
-                  {st.status === "pending" && <span style={{ color: "var(--text-dim)" }}>Chờ...</span>}
+                  {st.status === "pending" && <span style={{ color: "var(--text-dim)" }}>Chờ lượt...</span>}
                   {st.status === "processing" && (
                     <span style={{ color: "#38bdf8" }}>Đang cào...</span>
                   )}
@@ -825,7 +1044,8 @@ export default function CommentsScraper() {
                   gap: "0.5rem",
                 }}
               >
-                <span>📊</span> Bảng bình luận ({results.length} dòng)
+                <span>📊</span> Bảng bình luận ({displayResults.length} dòng
+                {deduplicate && results.length !== displayResults.length ? ` / ${results.length} gốc` : ""})
               </h3>
               <p
                 style={{
@@ -868,6 +1088,15 @@ export default function CommentsScraper() {
               <button
                 type="button"
                 className="btn-secondary"
+                onClick={handleExportJsonl}
+                title="Xuất file JSONL (.jsonl) chuẩn nạp mô hình NLP / Hugging Face Datasets"
+              >
+                📄 JSONL
+              </button>
+
+              <button
+                type="button"
+                className="btn-secondary"
                 onClick={handleExportExcel}
                 title="Xuất file bảng tính Excel (.xlsx)"
               >
@@ -897,7 +1126,7 @@ export default function CommentsScraper() {
                 </tr>
               </thead>
               <tbody>
-                {filteredResults.map((row) => (
+                {displayResults.map((row) => (
                   <tr key={row.id}>
                     <td
                       style={{
@@ -930,6 +1159,7 @@ export default function CommentsScraper() {
             </table>
           </div>
 
+          {/* Dataset Quality & Metadata Summary */}
           <div
             style={{
               padding: "0.75rem 1.25rem",
@@ -941,16 +1171,26 @@ export default function CommentsScraper() {
               fontSize: "0.8rem",
               color: "var(--text-muted)",
               flexWrap: "wrap",
-              gap: "0.5rem",
+              gap: "0.75rem",
             }}
           >
             <span>
-              Hiển thị <strong>{filteredResults.length}</strong> /{" "}
+              Hiển thị <strong>{displayResults.length}</strong> /{" "}
               <strong>{results.length}</strong> bình luận
+              {deduplicate && results.length > displayResults.length && (
+                <span style={{ color: "#34d399", marginLeft: "0.5rem" }}>
+                  (Đã loại bỏ {results.length - displayResults.length} bình luận trùng)
+                </span>
+              )}
             </span>
-            <span style={{ fontFamily: "var(--font-mono)" }}>
-              Dataset: {parsedUrls.length} URLs | 2 Columns: [id, Comment]
-            </span>
+
+            {datasetStats && (
+              <span style={{ display: "flex", gap: "1rem", fontFamily: "var(--font-mono)" }}>
+                <span>Độ dài TB: ~{datasetStats.avgWords} từ/cmt</span>
+                <span>Tỉ lệ duy nhất: {datasetStats.uniquePercent}%</span>
+                <span>Chuẩn format: 2 Columns [id, Comment]</span>
+              </span>
+            )}
           </div>
         </section>
       )}
