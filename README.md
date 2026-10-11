@@ -65,7 +65,7 @@ vercel
 
 ## 🔌 API Reference
 
-### 1. Facebook Scraper
+### 1. Facebook Video/Reels Scraper
 
 - **Endpoint**: `POST /api/scrape/facebook`
 - **Body**:
@@ -78,7 +78,49 @@ vercel
   }
   ```
 
-### 2. TikTok Scraper
+### 2. Facebook Comments Scraper
+
+- **Endpoint**: `POST /api/scrape/facebook/comments` (also supports `GET ?url=...&maxComments=50`)
+- **Body**:
+
+  ```json
+  {
+    "url": "https://www.facebook.com/zuck/posts/pfbid023Anbd22r92VQN9K23DGhd8t6WSK5g8S8cmjKvNogJEYhFQRwHSWdUz6sc5cJjPcYl",
+    "maxComments": 100,
+    "expandReplies": true
+  }
+  ```
+- **Response**:
+
+  ```json
+  {
+    "success": true,
+    "url": "https://www.facebook.com/...",
+    "total": 37,
+    "comments": [
+      {
+        "id": "1429300778641244",
+        "text": "Ten years of smoking meats!...",
+        "author": "Ayodele Abraham Osijonwo",
+        "time": "7 giờ",
+        "likes": 49,
+        "isReply": false,
+        "replyTo": null
+      },
+      {
+        "id": "1653167209515493",
+        "text": "Ayodele Abraham Osijonwo believe",
+        "author": "Aleruchi Odum",
+        "time": "4 giờ",
+        "likes": null,
+        "isReply": true,
+        "replyTo": "Ayodele Abraham Osijonwo"
+      }
+    ]
+  }
+  ```
+
+### 3. TikTok Scraper
 
 - **Endpoint**: `POST /api/scrape/tiktok`
 - **Body**:
