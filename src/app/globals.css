@@ -196,6 +196,13 @@ body {
   box-shadow: 0 0 16px rgba(217, 70, 239, 0.25);
 }
 
+.tab-btn.active.cmts {
+  background: #064e3b;
+  border-color: #10b981;
+  color: #ffffff;
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.25);
+}
+
 .section-header-row {
   display: flex;
   justify-content: space-between;
@@ -239,6 +246,12 @@ body {
   background: rgba(217, 70, 239, 0.15);
   border: 1px solid rgba(217, 70, 239, 0.35);
   color: #e879f9;
+}
+
+.platform-pill.cmts {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #34d399;
 }
 
 /* Clean Panels */
@@ -382,6 +395,14 @@ body {
 }
 .btn-primary.ig:hover:not(:disabled) {
   background: #86198f;
+}
+
+.btn-primary.cmts {
+  background: #059669;
+  border-color: #047857;
+}
+.btn-primary.cmts:hover:not(:disabled) {
+  background: #047857;
 }
 
 .btn-stop {

@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import CommentsScraper from "./components/CommentsScraper";
 
 interface FacebookItem {
   url: string;
@@ -155,6 +156,7 @@ function mergeRows<T extends { url: string }>(previous: T[], incoming: T[], retr
 }
 
 type PlatformKey = "facebook" | "tiktok" | "youtube" | "instagram";
+type TabKey = PlatformKey | "comments";
 type ScrapedItem = FacebookItem | TikTokItem | YouTubeItem | InstagramItem;
 
 const PLATFORMS = {
@@ -369,7 +371,7 @@ function ResultsTable({
 }
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<PlatformKey>("facebook");
+  const [activeTab, setActiveTab] = useState<TabKey>("facebook");
 
   // Facebook state
   const [fbInput, setFbInput] = useState(SAMPLE_FB_URLS);
@@ -1181,7 +1183,7 @@ export default function Home() {
     URL.revokeObjectURL(url);
   };
 
-  const currentPlatform = PLATFORMS[activeTab];
+  const currentPlatform = activeTab === "comments" ? PLATFORMS.facebook : PLATFORMS[activeTab];
 
   const activeInput =
     activeTab === "facebook" ? fbInput : activeTab === "tiktok" ? ttInput : activeTab === "instagram" ? igInput : ytInput;
@@ -1307,8 +1309,22 @@ export default function Home() {
         >
           <span>📷</span> Instagram Reels / Videos
         </button>
+        <button
+          id="tab-cmts-btn"
+          className={`tab-btn ${activeTab === "comments" ? "active cmts" : ""}`}
+          onClick={() => {
+            setActiveTab("comments");
+            setSearchQuery("");
+          }}
+        >
+          <span>💬</span> Comments Scraper
+        </button>
       </nav>
 
+      {activeTab === "comments" ? (
+        <CommentsScraper />
+      ) : (
+        <>
       {/* Input Section */}
       <section className="glass-card" aria-labelledby="input-section-title">
         <div className="section-header-row">
@@ -1563,6 +1579,8 @@ export default function Home() {
             />
           </div>
         </section>
+      )}
+      </>
       )}
     </main>
   );
